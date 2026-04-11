@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from app.persistence.sqlite.applications import SqliteApplicationRepository, SqliteDraftRepository
 from app.state.prepare import Application, Draft, PrepareRequest, PrepareResponse
@@ -44,14 +45,27 @@ async def get_application(app_id: str, request: Request):
     return {"application": app.model_dump(), "drafts": [d.model_dump() for d in drafts]}
 
 
+class ApproveRequest(BaseModel):
+    cover_letter: str | None = None
+
+
 @router.post("/applications/{app_id}/approve", response_model=dict)
-async def approve_application(app_id: str, request: Request):
+async def approve_application(app_id: str, request: Request, body: ApproveRequest = ApproveRequest()):
     repo: SqliteApplicationRepository = request.app.state.application_repository
+    draft_repo: SqliteDraftRepository = request.app.state.draft_repository
     app = await repo.get(app_id)
     if app is None:
         raise HTTPException(status_code=404, detail="application not found")
     if app.state not in ("prepared",):
         raise HTTPException(status_code=409, detail=f"cannot approve from state '{app.state}'")
+
+    # Persist edited cover letter if provided
+    if body.cover_letter is not None:
+        drafts = await draft_repo.list_for_application(app_id)
+        cl_draft = next((d for d in drafts if d.draft_type == "cover_letter"), None)
+        if cl_draft:
+            await draft_repo.update_content(cl_draft.id, body.cover_letter)
+
     await repo.update_state(app_id, "approved")
     return {"application_id": app_id, "state": "approved"}
 

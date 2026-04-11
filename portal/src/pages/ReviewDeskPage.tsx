@@ -15,6 +15,7 @@ export default function ReviewDeskPage() {
   const [prepared, setPrepared] = useState<PrepareResponse | null>(null);
   const [applicationId, setApplicationId] = useState<string | null>(null);
   const [actionDone, setActionDone] = useState<"approved" | "discarded" | null>(null);
+  const [coverLetterText, setCoverLetterText] = useState<string>("");
 
   const jobsQuery = useQuery({
     queryKey: ["jobs"],
@@ -27,11 +28,12 @@ export default function ReviewDeskPage() {
       setPrepared(data);
       setApplicationId(data.application_id);
       setActionDone(null);
+      setCoverLetterText(data.cover_letter ?? "");
     },
   });
 
   const approveMutation = useMutation({
-    mutationFn: (appId: string) => approveApplication(appId),
+    mutationFn: (appId: string) => approveApplication(appId, coverLetterText),
     onSuccess: () => {
       setActionDone("approved");
       queryClient.invalidateQueries({ queryKey: ["applications"] });
@@ -181,7 +183,8 @@ export default function ReviewDeskPage() {
             <section style={{ marginBottom: "1.5rem" }}>
               <h3>Cover Letter</h3>
               <textarea
-                defaultValue={prepared.cover_letter}
+                value={coverLetterText}
+                onChange={(e) => setCoverLetterText(e.target.value)}
                 rows={12}
                 style={{
                   width: "100%",
@@ -191,6 +194,7 @@ export default function ReviewDeskPage() {
                   fontFamily: "inherit",
                   fontSize: 14,
                   resize: "vertical",
+                  whiteSpace: "pre-wrap",
                 }}
               />
             </section>

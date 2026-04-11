@@ -36,8 +36,27 @@ _PROFILE_FIELD_MAP = {
     "mobile": lambda p: p.get("contact", {}).get("phone", ""),
     "location": lambda p: p.get("location", ""),
     "city": lambda p: p.get("location", "").split(",")[0].strip() if p.get("location") else "",
+    "right to work": lambda p: p.get("work_rights", ""),
+    "work rights": lambda p: p.get("work_rights", ""),
+    "right to work in australia": lambda p: p.get("work_rights", ""),
+    "salary": lambda p: p.get("salary_expectation", ""),
+    "salary expectation": lambda p: p.get("salary_expectation", ""),
+    "expected salary": lambda p: p.get("salary_expectation", ""),
+    "notice period": lambda p: p.get("notice_period", ""),
+    "availability": lambda p: p.get("notice_period", ""),
     "cover letter": None,  # handled separately
 }
+
+
+def _skills_set(profile: dict) -> set[str]:
+    """All skill names from profile in lowercase for fast lookup."""
+    skills = profile.get("core_strengths", [])
+    # Also pull from experience highlights for broader coverage
+    extra = []
+    for exp in profile.get("experience", []):
+        extra.extend(exp.get("technologies", []))
+        extra.extend(exp.get("skills", []))
+    return {s.lower() for s in skills + extra}
 
 
 def _lookup_from_profile(field: FieldInfo, profile: dict) -> str | None:
@@ -82,7 +101,15 @@ async def _resolve_via_llm(
 
     options_text = ""
     if field.options:
-        options_text = f"\nAvailable options: {', '.join(field.options)}"
+        options_list = "\n".join(f"  - {o}" for o in field.options)
+        options_text = f"\nOptions:\n{options_list}"
+
+    is_radio_group = field.field_type == "radio" and bool(field.options)
+    radio_instruction = (
+        "This is a radio button group. You must pick EXACTLY ONE option from the list above. "
+        "Return the exact text of the chosen option as the answer. "
+        "Pick the option most appropriate for the candidate."
+    ) if is_radio_group else ""
 
     system = (
         "You are filling out a job application form on behalf of a candidate. "
@@ -93,7 +120,7 @@ async def _resolve_via_llm(
     user = f"""Form field: {field.label}
 Field type: {field.field_type}{options_text}
 Required: {field.required}
-
+{radio_instruction}
 Candidate profile (summary):
 Name: {profile.get('name')}
 Location: {profile.get('location')}
@@ -152,6 +179,22 @@ async def propose_field_values(
             log.debug("[field:%s] label=%r → cover_letter (%d words)", field.id, field.label, len(cover_letter.split()))
             continue
 
+        # Radio groups: cover letter → always "Write a cover letter"; all others → keep default
+        if field.field_type == "radio":
+            if "cover letter" in label_lower and field.options:
+                write_opt = next((o for o in field.options if "write" in o.lower()), None)
+                if write_opt:
+                    proposed[field.id] = write_opt
+                    log.debug("[field:%s] label=%r → radio force=%r", field.id, field.label, write_opt)
+                    continue
+            # All other radio groups: keep whatever SEEK already has selected
+            if field.current_value:
+                proposed[field.id] = field.current_value
+                log.debug("[field:%s] label=%r → radio keep default=%r", field.id, field.label, field.current_value)
+            else:
+                log.debug("[field:%s] label=%r → radio no default, skipping", field.id, field.label)
+            continue
+
         # 1. Profile lookup
         value = _lookup_from_profile(field, profile)
         if value:
@@ -164,6 +207,14 @@ async def propose_field_values(
         if value:
             proposed[field.id] = value
             log.debug("[field:%s] label=%r → memory value=%r", field.id, field.label, value)
+            continue
+
+        # 2b. Skill checkbox — resolve Yes/No directly from profile skills (no LLM)
+        if field.field_type == "checkbox":
+            known = _skills_set(profile)
+            answer = "Yes" if label_lower.strip() in known else "No"
+            proposed[field.id] = answer
+            log.debug("[field:%s] label=%r → skill_check=%r", field.id, field.label, answer)
             continue
 
         # 3. LLM

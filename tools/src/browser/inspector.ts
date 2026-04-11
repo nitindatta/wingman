@@ -99,7 +99,9 @@ export async function inspectStep(page: Page): Promise<InspectResult> {
     .all();
   const visible_actions: string[] = [];
   for (const btn of actionButtons) {
-    const text = (await btn.textContent())?.trim();
+    const raw = (await btn.textContent())?.trim() ?? '';
+    // Strip zero-width characters injected by some UIs (U+2060 word joiner, etc.)
+    const text = raw.replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '').trim();
     if (text && !visible_actions.includes(text)) visible_actions.push(text);
   }
 
@@ -129,21 +131,29 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select',
     );
 
+    let synthIndex = 0;
     for (const el of inputs) {
       const input = el as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
-      const id = input.id || input.name || '';
-      if (!id) continue;
 
-      // Find label
+      // Find label first — we use it for stable synthetic IDs
       let label = '';
       const labelEl =
-        document.querySelector(`label[for="${id}"]`) ??
+        document.querySelector(`label[for="${input.id}"]`) ??
         input.closest('label') ??
         input.closest('[class*="field"], [class*="form-group"], [class*="question"]')
           ?.querySelector('label, [class*="label"]');
       if (labelEl) label = labelEl.textContent?.trim() ?? '';
       if (!label && input.getAttribute('placeholder')) label = input.getAttribute('placeholder')!;
       if (!label && input.getAttribute('aria-label')) label = input.getAttribute('aria-label')!;
+
+      // Stable ID: prefer native id/name, then data attrs, then label-based, then positional
+      // Label-based IDs are prefixed __lbl_ so the filler knows to use getByLabel()
+      const rawLabel = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      const id = input.id || input.name
+        || input.getAttribute('data-testid')
+        || input.getAttribute('data-automation')
+        || (rawLabel ? `__lbl_${rawLabel}__` : `__synth_${synthIndex++}__`);
+
       if (!label) label = id;
 
       const tagName = input.tagName.toLowerCase();
@@ -159,13 +169,32 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
         current_value = (input as HTMLSelectElement).value || null;
         options = Array.from((input as HTMLSelectElement).options).map((o) => o.text.trim());
       } else if (field_type === 'radio') {
-        const checked = document.querySelector<HTMLInputElement>(`input[name="${input.name}"]:checked`);
-        current_value = checked?.value ?? null;
-        options = Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${input.name}"]`))
+        // For radio buttons: use the group name as the ID so the whole group is one field.
+        // The id variable above may be the React-generated per-element id; override with group name.
+        const groupName = (input as HTMLInputElement).name || id;
+        // Collect all labels in this group
+        const groupOptions = Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${groupName}"]`))
           .map((r) => {
-            const lbl = document.querySelector(`label[for="${r.id}"]`);
-            return lbl?.textContent?.trim() ?? r.value;
-          });
+            const lbl = document.querySelector(`label[for="${r.id}"]`) ??
+              r.closest('label') ??
+              r.closest('[class*="field"],[class*="question"]')?.querySelector('label,[class*="label"]');
+            return lbl?.textContent?.trim() ?? r.value ?? '';
+          }).filter(Boolean);
+        const checkedEl = document.querySelector<HTMLInputElement>(`input[name="${groupName}"]:checked`);
+        const checkedLabel = checkedEl
+          ? (document.querySelector(`label[for="${checkedEl.id}"]`)?.textContent?.trim() ?? checkedEl.value)
+          : null;
+        // Override id to group name so duplicates collapse in dedup step
+        fields.push({
+          id: groupName,
+          label,
+          field_type: 'radio',
+          required: input.required,
+          current_value: checkedLabel,
+          options: groupOptions,
+          max_length: null,
+        });
+        continue; // skip the generic push below
       } else {
         current_value = (input as HTMLInputElement).value || null;
       }

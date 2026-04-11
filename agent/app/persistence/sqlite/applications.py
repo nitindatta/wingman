@@ -123,6 +123,13 @@ class SqliteDraftRepository:
         await self._conn.commit()
         return draft_id
 
+    async def update_content(self, draft_id: str, content: str) -> None:
+        await self._conn.execute(
+            "UPDATE drafts SET content = ?, version = version + 1 WHERE id = ?",
+            (content, draft_id),
+        )
+        await self._conn.commit()
+
     async def list_for_application(self, application_id: str) -> list[Draft]:
         async with self._conn.execute(
             "SELECT id, application_id, draft_type, question_fingerprint, "

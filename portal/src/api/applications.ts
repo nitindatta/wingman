@@ -30,8 +30,11 @@ export async function triggerPrepare(jobId: string): Promise<PrepareResponse> {
   return prepareResponseSchema.parse(raw);
 }
 
-export async function approveApplication(appId: string): Promise<void> {
-  await apiFetch<unknown>(`/applications/${appId}/approve`, { method: "POST" });
+export async function approveApplication(appId: string, coverLetter?: string): Promise<void> {
+  await apiFetch<unknown>(`/applications/${appId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({ cover_letter: coverLetter ?? null }),
+  });
 }
 
 export async function discardApplication(appId: string): Promise<void> {

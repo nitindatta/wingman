@@ -173,13 +173,63 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     const failed_ids: string[] = [];
     for (const { id, value } of parsed.data.fields) {
       try {
-        const el = session.page.locator(`[id="${id}"], [name="${id}"]`).first();
+        // Resolve element: native id/name → data attrs → label-based (stable across re-renders)
+        let el;
+        if (id.startsWith('__lbl_')) {
+          // Extract original label from __lbl_the_label__ pattern
+          const labelKey = id.replace(/^__lbl_/, '').replace(/__$/, '').replace(/_/g, ' ');
+          el = session.page.getByLabel(labelKey, { exact: false }).first();
+        } else {
+          el = session.page.locator(`[id="${id}"], [name="${id}"]`).first();
+          if (!(await el.count())) {
+            el = session.page.locator(`[data-testid="${id}"], [data-automation="${id}"]`).first();
+          }
+        }
         if (!(await el.count())) { failed_ids.push(id); continue; }
+
         const tagName = await el.evaluate((e) => (e as HTMLElement).tagName.toLowerCase());
-        if (tagName === 'select') {
+        const inputType = await el.evaluate((e) => (e as HTMLInputElement).type ?? '');
+
+        if (inputType === 'radio') {
+          // Radio group: id is the group name. Use Playwright locator.click() (not DOM click)
+          // so React synthetic event handlers fire properly.
+          const radios = session.page.locator(`input[name="${id}"]`);
+          const count = await radios.count();
+          let matched = false;
+          for (let i = 0; i < count; i++) {
+            const radio = radios.nth(i);
+            const radioId = await radio.getAttribute('id') ?? '';
+            const labelText = await session.page.evaluate((rid) => {
+              const lbl = document.querySelector(`label[for="${rid}"]`) ??
+                document.querySelector(`[id="${rid}"]`)?.closest('label') ??
+                document.querySelector(`[id="${rid}"]`)
+                  ?.closest('[class*="field"],[class*="question"]')
+                  ?.querySelector('label,[class*="label"]');
+              return lbl?.textContent?.trim() ?? '';
+            }, radioId);
+            if (labelText.toLowerCase() === value.toLowerCase()) {
+              await radio.click();
+              matched = true;
+              break;
+            }
+          }
+          if (matched) filled_ids.push(id); else failed_ids.push(id);
+          continue;
+        } else if (tagName === 'select') {
           await el.selectOption({ label: value }).catch(async () => el.selectOption({ value }));
-        } else if ((await el.evaluate((e) => (e as HTMLInputElement).type)) === 'file') {
+        } else if (inputType === 'file') {
           failed_ids.push(id); continue;
+        } else if (tagName === 'textarea') {
+          // fill() then fire React-compatible events so controlled state updates
+          await el.fill(value);
+          await el.evaluate((node, val) => {
+            const nativeSetter = Object.getOwnPropertyDescriptor(
+              window.HTMLTextAreaElement.prototype, 'value'
+            )?.set;
+            nativeSetter?.call(node, val);
+            node.dispatchEvent(new Event('input', { bubbles: true }));
+            node.dispatchEvent(new Event('change', { bubbles: true }));
+          }, value);
         } else {
           await el.fill(value);
         }
@@ -187,14 +237,25 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
       } catch { failed_ids.push(id); }
     }
 
-    // Click the action button
+    // Click the action button — strip zero-width chars from label before matching
+    const cleanLabel = parsed.data.action_label.replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '').trim();
     const prevUrl = session.page.url();
     await session.page
-      .getByRole('button', { name: parsed.data.action_label, exact: false })
+      .getByRole('button', { name: cleanLabel, exact: false })
       .first()
-      .click({ timeout: 10_000 });
-    await session.page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {});
-    await session.page.waitForTimeout(1_500);
+      .click({ timeout: 30_000 });
+
+    // SEEK is a SPA — waitForLoadState('domcontentloaded') never fires on step transitions.
+    // Instead: wait for URL change OR for the button to disappear (step changed).
+    // Fall back to a fixed 3s wait so we don't burn 30s every step.
+    await Promise.race([
+      session.page.waitForURL((url) => url.toString() !== prevUrl, { timeout: 5_000 }).catch(() => {}),
+      session.page.waitForSelector(
+        `button:not(:has-text("${cleanLabel}"))`,
+        { state: 'attached', timeout: 5_000 }
+      ).catch(() => {}),
+      session.page.waitForTimeout(3_000),
+    ]);
 
     // Inspect the new step
     const result = await inspectStep(session.page);
