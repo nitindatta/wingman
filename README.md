@@ -1,6 +1,6 @@
 # Envoy
 
-A local, review-first autonomous job application agent. Envoy searches SEEK for jobs matching your criteria, drafts personalised cover letters, fills out application forms, and asks you to confirm before submitting. Everything runs on your own machine — no cloud, no data sharing.
+A local, review-first autonomous job application agent. Envoy searches SEEK for jobs matching your criteria, drafts personalised cover letters, fills out application forms, and asks you to confirm before submitting. Agent runs on your own machine.
 
 ---
 
