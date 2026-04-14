@@ -1,4 +1,11 @@
-"""Background queue worker — processes work_queue items serially."""
+"""Background queue workers — two lanes:
+
+  prepare-lane  — pool of N concurrent tasks (LLM-only, no browser)
+  apply-lane    — single serial task (browser, Chrome profile lock)
+
+Concurrency for the prepare lane is set by settings.worker_prepare_concurrency
+(default 2, env var WORKER_PREPARE_CONCURRENCY).
+"""
 
 from __future__ import annotations
 
@@ -10,46 +17,100 @@ from typing import Any
 
 log = logging.getLogger("queue_worker")
 
+# ── Prepare lane ───────────────────────────────────────────────────────────────
 
-async def run_queue_worker(app_state: Any) -> None:
-    """Runs forever as an asyncio task. Call from FastAPI lifespan."""
-    log.info("[worker] started")
+async def run_prepare_worker(app_state: Any) -> None:
+    """Pool-based worker for 'prepare' items.
+
+    Spawns up to `settings.worker_prepare_concurrency` concurrent prepare tasks.
+    Each slot is released as soon as the task finishes so the next item can start.
+    """
+    concurrency = app_state.settings.worker_prepare_concurrency
+    semaphore = asyncio.Semaphore(concurrency)
+    log.info("[prepare-worker] started concurrency=%d", concurrency)
+
     while True:
         try:
-            queue_repo = app_state.queue_repository
-            item = await queue_repo.claim_next()
+            # Only try to claim when a slot is free
+            await semaphore.acquire()
+
+            item = await app_state.queue_repository.claim_next_of_types(["prepare"])
+            if item is None:
+                semaphore.release()
+                await asyncio.sleep(1.5)
+                continue
+
+            log.info(
+                "[prepare-worker] claimed id=%s entity=%s",
+                item.id, item.entity_id,
+            )
+
+            async def _run(i=item):
+                try:
+                    await _handle_prepare(i, app_state)
+                    await app_state.queue_repository.mark_done(i.id)
+                    log.info("[prepare-worker] done id=%s", i.id)
+                except Exception as exc:
+                    log.exception("[prepare-worker] item %s failed: %s", i.id, exc)
+                    await app_state.queue_repository.mark_failed(i.id, str(exc))
+                    with contextlib.suppress(Exception):
+                        await app_state.application_repository.update_state(i.entity_id, "failed")
+                finally:
+                    semaphore.release()
+
+            asyncio.create_task(_run())
+
+        except asyncio.CancelledError:
+            log.info("[prepare-worker] cancelled — shutting down")
+            raise
+        except Exception as outer_exc:
+            log.exception("[prepare-worker] outer loop error: %s", outer_exc)
+            semaphore.release()
+            await asyncio.sleep(5)
+
+
+# ── Apply lane ─────────────────────────────────────────────────────────────────
+
+async def run_apply_worker(app_state: Any) -> None:
+    """Serial worker for 'apply' and 'resume' items.
+
+    Must stay serial — Playwright uses a single Chrome profile directory which
+    Chrome locks exclusively. Two concurrent sessions against the same profile
+    will crash.
+    """
+    log.info("[apply-worker] started (serial)")
+
+    while True:
+        try:
+            item = await app_state.queue_repository.claim_next_of_types(["apply", "resume"])
             if item is None:
                 await asyncio.sleep(1.5)
                 continue
 
             log.info(
-                "[worker] claimed item id=%s type=%s entity=%s",
+                "[apply-worker] claimed id=%s type=%s entity=%s",
                 item.id, item.queue_type, item.entity_id,
             )
 
             try:
-                if item.queue_type == "prepare":
-                    await _handle_prepare(item, app_state)
-                elif item.queue_type in ("apply", "resume"):
-                    await _handle_apply_or_resume(item, app_state)
-                else:
-                    log.warning("[worker] unknown queue_type=%s", item.queue_type)
-                await queue_repo.mark_done(item.id)
-                log.info("[worker] done item id=%s", item.id)
+                await _handle_apply_or_resume(item, app_state)
+                await app_state.queue_repository.mark_done(item.id)
+                log.info("[apply-worker] done id=%s", item.id)
             except Exception as exc:
-                log.exception("[worker] item %s failed: %s", item.id, exc)
-                await queue_repo.mark_failed(item.id, str(exc))
-                # Mark application as failed if we can
+                log.exception("[apply-worker] item %s failed: %s", item.id, exc)
+                await app_state.queue_repository.mark_failed(item.id, str(exc))
                 with contextlib.suppress(Exception):
                     await app_state.application_repository.update_state(item.entity_id, "failed")
 
         except asyncio.CancelledError:
-            log.info("[worker] cancelled — shutting down")
+            log.info("[apply-worker] cancelled — shutting down")
             raise
         except Exception as outer_exc:
-            log.exception("[worker] outer loop error: %s", outer_exc)
+            log.exception("[apply-worker] outer loop error: %s", outer_exc)
             await asyncio.sleep(5)
 
+
+# ── Handlers (unchanged) ───────────────────────────────────────────────────────
 
 async def _handle_prepare(item: Any, app_state: Any) -> None:
     from app.workflows.prepare import run_prepare

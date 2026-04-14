@@ -40,6 +40,9 @@ class Settings(BaseSettings):
         validation_alias="OPENAI_COMPAT_MODEL",
     )
 
+    # Worker
+    worker_prepare_concurrency: int = Field(default=2, validation_alias="WORKER_PREPARE_CONCURRENCY")
+
     # Persistence
     repo_root: Path = Field(default=Path(__file__).resolve().parents[2])
     sqlite_path: Path = Field(default=Path("../automation/agent.db"))

@@ -66,7 +66,6 @@ class CoverLetterState(BaseModel):
     name: str
     headline: str
     summary: str
-    personal_statement: str
     narrative_strengths_text: str  # pre-written evidence sentences grounded in real work
     experience_text: str
     projects_text: str
@@ -74,6 +73,7 @@ class CoverLetterState(BaseModel):
 
     tone: str = "consultative, senior, practical"
     max_words: int = 320
+    writing_samples: list[str] = Field(default_factory=list)  # user's own sentences to mirror
 
     # Pre-populated from cache (skips parse_jd LLM call when set)
     cached_must_have: list[str] = Field(default_factory=list)
@@ -373,53 +373,63 @@ Skills: {state.skills}"""
             return {"fit_score": fit_score, "fit_verdict": verdict, "gaps": gaps, "is_suitable": is_suitable}
 
         async def _write_draft() -> str:
+            # Build voice block — writing_samples first (most direct signal),
+            # fall back to summary (also written by the candidate in their own words)
+            voice_lines: list[str] = []
+            if state.writing_samples:
+                voice_lines.append("VOICE SAMPLES — sentences this person has actually written:")
+                for s in state.writing_samples:
+                    voice_lines.append(f'  "{s}"')
+            elif state.summary:
+                voice_lines.append("VOICE SAMPLE — how this person writes about themselves:")
+                voice_lines.append(f'  "{state.summary[:600]}"')
+            voice_block = "\n".join(voice_lines)
+
             response = await client.chat.completions.create(
                 model=settings.openai_model,
                 messages=[
                     {
                         "role": "system",
                         "content": (
-                            f"Write a cover letter body in a {state.tone} tone. "
-                            f"Target {state.max_words} words. "
-                            "Use exactly 3 paragraphs separated by blank lines (\\n\\n).\n"
-                            "Paragraph 1: one direct sentence naming the specific fit — what the candidate has that this role needs.\n"
-                            "Paragraph 2: 2–3 sentences of concrete evidence from the talking points — name actual tools, "
-                            "projects, or outcomes. Be specific, not vague.\n"
-                            "Paragraph 3: 1–2 sentences on broader relevant experience, then one short closing sentence.\n\n"
-                            "CONTENT RULES — these override everything else:\n"
-                            "- Write ONLY about topics that appear in the job requirements. "
-                            "Do not volunteer skills or experience areas the job did not ask for, "
-                            "even if the candidate has them. Match the employer's scope, not the candidate's full breadth.\n"
-                            "- The talking points are your only source of facts. Do not invent claims or add context "
-                            "from the candidate's voice section — that section sets writing style only, not content.\n\n"
+                            "You are ghostwriting a cover letter. Your job is to make it sound like the candidate "
+                            "wrote it themselves, not like an AI produced it.\n\n"
+                            "VOICE — this is the most important instruction:\n"
+                            "Study the voice samples provided. Mirror the candidate's actual writing style: "
+                            "their sentence rhythm, how they open sentences, vocabulary level, use of contractions, "
+                            "how direct or reflective they are, whether they use 'I've' vs 'I have', etc. "
+                            "The letter should read as if the candidate typed it, not as if a system generated it. "
+                            "Adapt phrasing from the samples naturally — do not copy them verbatim.\n\n"
+                            "STRUCTURE:\n"
+                            f"3 short paragraphs, each 2–4 sentences. Target {state.max_words} words total. "
+                            "Paragraphs should flow naturally from the candidate's voice — do not make them "
+                            "formulaic or symmetrical. They can vary in length and approach.\n\n"
+                            "CONTENT RULES:\n"
+                            "- Talking points are your only source of facts. Do not invent claims.\n"
+                            "- Write ONLY about what the job asked for. Do not volunteer unrelated skills.\n"
+                            "- Name actual tools, systems, and outcomes. No vague generalisations.\n\n"
                             "STYLE RULES:\n"
-                            "- Write like a senior engineer writing a direct email, not like an AI writing a cover letter.\n"
-                            "- Vary sentence length: mix short punchy sentences with longer ones. Avoid a uniform rhythm.\n"
-                            "- Use first person naturally. Contractions are fine (I've, I'm, it's).\n"
-                            "- Be specific. Name tools, systems, outcomes — never say 'various technologies' or 'multiple projects'.\n"
-                            "- No hyphens or dashes of any kind: do NOT use — or – or - as punctuation mid-sentence. "
-                            "Rewrite those phrases as separate sentences or use 'and', 'which', 'where', or a comma instead.\n"
-                            "- No buzzwords: do NOT use leverage, utilize, passionate, excited, dynamic, innovative, "
-                            "transformative, robust, spearhead, streamline, synergy, cutting-edge, foster, facilitate, "
-                            "thrive, impactful, drive results, or any similar corporate filler.\n"
-                            "- No self-praise: avoid 'strong communicator', 'team player', 'fast learner', 'detail-oriented'.\n"
-                            "- No greeting, no sign-off, no 'I am writing to apply'. Return ONLY the 3 paragraphs."
+                            "- No buzzwords: leverage, utilize, passionate, excited, innovative, transformative, "
+                            "robust, spearhead, streamline, synergy, cutting-edge, foster, impactful, drive results.\n"
+                            "- No self-praise labels: 'strong communicator', 'team player', 'fast learner'.\n"
+                            "- No dashes as mid-sentence punctuation (— or –). Use a comma or new sentence instead.\n"
+                            "- No greeting, no sign-off, no 'I am writing to apply'.\n"
+                            "Return ONLY the 3 paragraphs separated by blank lines."
                         ),
                     },
                     {
                         "role": "user",
                         "content": (
-                            f"Write the cover letter body for {state.name} applying to "
+                            f"{voice_block}\n\n"
+                            f"Now write the cover letter body for {state.name} applying to "
                             f"{state.job_title} at {state.job_company}.\n\n"
-                            f"Candidate's voice (use this to set tone — do not quote directly):\n{state.personal_statement}\n\n"
-                            f"Matched talking points — these are pre-written sentences grounded in real work. "
-                            f"Use them as the basis for your paragraphs. Adapt the phrasing but keep the substance. "
-                            f"Do not invent new claims or generalise into buzzwords:\n{strong_evidence}"
+                            f"Talking points — pre-written sentences grounded in real work. "
+                            f"Use these as the factual basis. Keep the substance, adapt the phrasing to match the voice above:\n"
+                            f"{strong_evidence}"
                         ),
                     },
                 ],
-                temperature=0.35,
-                max_tokens=500,
+                temperature=0.6,
+                max_tokens=600,
             )
             draft = response.choices[0].message.content or ""
             log.info("[write_draft] job=%s | words=%d", state.job_title, len(draft.split()))
@@ -502,12 +512,12 @@ Skills: {state.skills}"""
 
 def _format_experience(profile: dict) -> str:
     lines = []
-    for exp in profile.get("experience", [])[:5]:
+    for exp in profile.get("experience", [])[:8]:
         line = f"- {exp.get('title', '')} at {exp.get('company', '')}"
         period = exp.get("period", "")
         if period:
             line += f" ({period})"
-        for h in exp.get("highlights", [])[:4]:
+        for h in exp.get("highlights", [])[:3]:
             line += f"\n    • {h}"
         for m in exp.get("metrics", [])[:3]:
             line += f"\n    ★ {m}"
@@ -549,13 +559,13 @@ async def run_cover_letter(
         name=profile.get("name", ""),
         headline=profile.get("headline", ""),
         summary=profile.get("summary", ""),
-        personal_statement=profile.get("personal_statement", ""),
         narrative_strengths_text=_format_narrative_strengths(profile),
         experience_text=_format_experience(profile),
         projects_text=_format_projects(profile),
         skills=", ".join(profile.get("core_strengths", [])),
         tone=prefs.get("tone", "consultative, senior, practical"),
         max_words=prefs.get("max_words", 320),
+        writing_samples=profile.get("writing_samples", []),
         cached_must_have=cached_analysis.must_have if cached_analysis else [],
         cached_duties=cached_analysis.duties if cached_analysis else [],
         cached_nice_to_have=cached_analysis.nice_to_have if cached_analysis else [],

@@ -60,10 +60,30 @@ class SqliteQueueRepository:
 
     async def claim_next(self) -> WorkQueueItem | None:
         """Atomically claim the oldest pending item. Returns None if queue empty."""
-        async with self._conn.execute(
-            "SELECT id, queue_type, entity_id, payload_json, status, created_at "
-            "FROM work_queue WHERE status='pending' ORDER BY created_at ASC LIMIT 1",
-        ) as cur:
+        return await self.claim_next_of_types(None)
+
+    async def claim_next_of_types(self, types: list[str] | None) -> WorkQueueItem | None:
+        """Atomically claim the oldest pending item matching the given queue_types.
+
+        Args:
+            types: list of queue_type values to match, or None to match any.
+        """
+        if types is None:
+            sql = (
+                "SELECT id, queue_type, entity_id, payload_json, status, created_at "
+                "FROM work_queue WHERE status='pending' ORDER BY created_at ASC LIMIT 1"
+            )
+            params: tuple = ()
+        else:
+            placeholders = ",".join("?" * len(types))
+            sql = (
+                "SELECT id, queue_type, entity_id, payload_json, status, created_at "
+                f"FROM work_queue WHERE status='pending' AND queue_type IN ({placeholders}) "
+                "ORDER BY created_at ASC LIMIT 1"
+            )
+            params = tuple(types)
+
+        async with self._conn.execute(sql, params) as cur:
             row = await cur.fetchone()
 
         if row is None:

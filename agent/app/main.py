@@ -33,7 +33,7 @@ from app.persistence.sqlite.queue import SqliteQueueRepository
 from app.persistence.sqlite.workflow_runs import SqliteWorkflowRunRepository, SqliteBrowserSessionRepository
 from app.settings import get_settings
 from app.tools.client import ToolClient
-from app.worker.queue_worker import run_queue_worker
+from app.worker.queue_worker import run_apply_worker, run_prepare_worker
 
 
 @asynccontextmanager
@@ -51,15 +51,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.question_cache_repository = SqliteQuestionCacheRepository(database.connection)
     app.state.tool_client = ToolClient(settings)
 
-    worker_task = asyncio.create_task(run_queue_worker(app.state))
+    prepare_task = asyncio.create_task(run_prepare_worker(app.state))
+    apply_task = asyncio.create_task(run_apply_worker(app.state))
     try:
         yield
     finally:
-        worker_task.cancel()
-        try:
-            await worker_task
-        except asyncio.CancelledError:
-            pass
+        prepare_task.cancel()
+        apply_task.cancel()
+        for t in (prepare_task, apply_task):
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
         await app.state.tool_client.aclose()
         await database.close()
 
