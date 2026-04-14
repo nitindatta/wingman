@@ -138,16 +138,22 @@ def build_cover_letter_graph(settings: Settings) -> Any:
                     "content": (
                         "Parse a job description into structured data.\n"
                         "Return JSON with exactly these keys:\n"
-                        '{"must_have": ["..."], "duties": ["..."], "nice_to_have": ["..."], "contact_name": "..."}\n'
+                        '{"must_have": ["..."], "duties": ["..."], "nice_to_have": ["..."], "contact_name": "...", "contact_confidence": "high|low"}\n'
                         "must_have: skills, experience, qualifications the candidate must bring. "
                         "Include years of experience, specific tools, technical skills, domain knowledge. "
                         "duties: what the person will actually do in the role day-to-day. "
                         "nice_to_have: bonus, preferred, or optional items explicitly marked as such. "
-                        'contact_name: ONLY the name of the hiring manager or recruiter for THIS specific role — '
-                        'someone you would address the cover letter to. '
-                        'Use "" if the person mentioned is a CEO, founder, executive, or is named in a company bio, '
-                        'award mention, or "About Us" context rather than as the contact for applicants. '
-                        'Use "" if only a job title, team name, or email is given. '
+                        'contact_name: The name of the person to address the cover letter to, '
+                        'or "" if none is found. '
+                        'ONLY use a name if it appears near application-related language — '
+                        'phrases like "contact [name]", "reach out to [name]", "applications to [name]", '
+                        '"speak to [name]", "ask [name]", "managed by [name] who is hiring". '
+                        'If the person is mentioned in a company bio, leadership section, award, '
+                        '"About Us", or founding story — even if they are the CEO or founder — use "". '
+                        'The test is context, not title: a founder who says "send your CV directly to me" counts; '
+                        'a recruiter mentioned only in an award paragraph does not. '
+                        'contact_confidence: "high" if you are certain this person is the application contact, '
+                        '"low" if you are guessing or the context is ambiguous. '
                         "Return ONLY the JSON object."
                     ),
                 },
@@ -168,7 +174,8 @@ def build_cover_letter_graph(settings: Settings) -> Any:
             nice_to_have = parsed.get("nice_to_have", [])
             duties = parsed.get("duties", [])
             raw_contact = parsed.get("contact_name", "")
-            contact_name = raw_contact if _is_real_name(raw_contact) else ""
+            confidence = parsed.get("contact_confidence", "low")
+            contact_name = raw_contact if (_is_real_name(raw_contact) and confidence == "high") else ""
             requirements = "\n".join(f"{i+1}. {r}" for i, r in enumerate(must_have))
             bonus = "\n".join(f"- {r}" for r in nice_to_have)
         except Exception:
