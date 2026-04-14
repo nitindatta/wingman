@@ -182,9 +182,37 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
         options = Array.from((input as HTMLSelectElement).options).map((o) => o.text.trim());
       } else if (field_type === 'radio') {
         // For radio buttons: use the group name as the ID so the whole group is one field.
-        // The id variable above may be the React-generated per-element id; override with group name.
         const groupName = (input as HTMLInputElement).name || id;
-        // Collect all labels in this group
+
+        // Question label comes from the group container, NOT the individual radio's label.
+        // Individual labels are the option text (Yes/No). Look for:
+        // 1. <legend> ancestor (standard fieldset pattern)
+        // 2. A heading/label in the nearest [class*="question"/"field"/"group"] ancestor
+        //    that is NOT itself a radio option label.
+        let groupLabel = '';
+        const fieldset = input.closest('fieldset');
+        if (fieldset) {
+          groupLabel = fieldset.querySelector('legend')?.textContent?.trim() ?? '';
+        }
+        if (!groupLabel) {
+          const container = input.closest('[class*="question"],[class*="field"],[class*="form-group"]');
+          if (container) {
+            // Find first heading-like element that isn't a label for a radio button
+            const heading = container.querySelector('legend, h1, h2, h3, h4, h5, [class*="label"]:not(label), [class*="title"], [class*="heading"]');
+            groupLabel = heading?.textContent?.trim() ?? '';
+            // Fallback: first <label> whose for= attribute doesn't match any radio in this group
+            if (!groupLabel) {
+              const firstLabel = container.querySelector('label');
+              const firstLabelFor = firstLabel?.getAttribute('for') ?? '';
+              const isOptionLabel = !!container.querySelector(`input[type="radio"][id="${firstLabelFor}"]`);
+              if (!isOptionLabel) groupLabel = firstLabel?.textContent?.trim() ?? '';
+            }
+          }
+        }
+        // Last resort: use the individual input's label (old behaviour — will show "Yes"/"No")
+        if (!groupLabel) groupLabel = label;
+
+        // Collect all option labels in this group
         const groupOptions = Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${groupName}"]`))
           .map((r) => {
             const lbl = document.querySelector(`label[for="${r.id}"]`) ??
@@ -196,10 +224,9 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
         const checkedLabel = checkedEl
           ? (document.querySelector(`label[for="${checkedEl.id}"]`)?.textContent?.trim() ?? checkedEl.value)
           : null;
-        // Override id to group name so duplicates collapse in dedup step
         fields.push({
           id: groupName,
-          label,
+          label: groupLabel,
           field_type: 'radio',
           required: input.required,
           current_value: checkedLabel,

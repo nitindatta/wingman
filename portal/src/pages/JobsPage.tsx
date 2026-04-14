@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchJobs, ignoreJob, queueJob, runSearch } from "@/api/jobs";
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
 import type { Job } from "@/api/schemas";
 
 function JobCard({ job, onReview, onIgnore, isPending }: {
@@ -112,9 +111,9 @@ function JobCard({ job, onReview, onIgnore, isPending }: {
 
 export default function JobsPage() {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const [keywords, setKeywords] = useState("python");
   const [location, setLocation] = useState("");
+  const [maxPages, setMaxPages] = useState(3);
 
   const jobsQuery = useQuery({
     queryKey: ["jobs", "discovered"],
@@ -130,8 +129,6 @@ export default function JobsPage() {
     mutationFn: queueJob,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      queryClient.invalidateQueries({ queryKey: ["applications"] });
-      navigate("/review-desk");
     },
   });
 
@@ -150,7 +147,7 @@ export default function JobsPage() {
         className="flex flex-wrap items-end gap-3 rounded-md border bg-white p-4"
         onSubmit={(e) => {
           e.preventDefault();
-          searchMutation.mutate({ provider: "seek", keywords, location: location || undefined });
+          searchMutation.mutate({ provider: "seek", keywords, location: location || undefined, max_pages: maxPages });
         }}
       >
         <label className="flex flex-col text-sm">
@@ -167,6 +164,17 @@ export default function JobsPage() {
             className="rounded border px-2 py-1"
             value={location}
             onChange={(e) => setLocation(e.target.value)}
+          />
+        </label>
+        <label className="flex flex-col text-sm">
+          <span className="mb-1 text-slate-600">Pages</span>
+          <input
+            type="number"
+            min={1}
+            max={10}
+            className="rounded border px-2 py-1 w-16"
+            value={maxPages}
+            onChange={(e) => setMaxPages(Math.max(1, Math.min(10, Number(e.target.value))))}
           />
         </label>
         <button

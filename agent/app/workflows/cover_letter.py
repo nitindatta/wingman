@@ -454,7 +454,8 @@ Skills: {state.skills}"""
 
         # Build greeting — only use contact_name if it's a real person's name
         if _is_real_name(state.contact_name):
-            greeting = f"Hi {state.contact_name},"
+            first_name = state.contact_name.split()[0]
+            greeting = f"Hi {first_name},"
         else:
             greeting = "Hi Recruitment Manager,"
 
