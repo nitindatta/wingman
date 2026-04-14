@@ -1,20 +1,20 @@
-"""AI field proposer — maps form fields to values using profile, memory, and LLM.
+"""AI field proposer — maps form fields to values using profile, cache, and LLM.
 
-Resolution order per design.md §7.1:
+Resolution order:
   1. Profile lookup (name, email, phone, work rights, location)
-  2. Memory lookup (question_answers table by question_fingerprint)
+  2. Cache lookup (question_answer_cache table — keyword/token overlap match)
   3. LLM call (only for fields not resolved above)
   4. Pause (interrupt) if LLM confidence is low
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 
 from openai import AsyncOpenAI
 
+from app.persistence.sqlite.question_cache import SqliteQuestionCacheRepository
 from app.settings import Settings
 from app.state.apply import FieldInfo
 
@@ -59,6 +59,69 @@ def _skills_set(profile: dict) -> set[str]:
     return {s.lower() for s in skills + extra}
 
 
+def _best_select_match(value: str, options: list[str]) -> str | None:
+    """Find the best matching option for a profile value in a select field.
+
+    Tries in order:
+    1. Exact case-insensitive match
+    2. Any option that contains the profile value as a substring (or vice-versa)
+    3. Numeric range overlap — extract all integers from both sides and check if
+       the profile's lower-bound falls inside the option's range. Handles the
+       common SEEK +1 offset ($180,000 profile → "$180,001 - $200,000" option).
+    """
+    import re as _re
+
+    val_lower = value.lower().strip()
+
+    # 1. Exact
+    for opt in options:
+        if opt.lower().strip() == val_lower:
+            return opt
+
+    # 2. Substring containment
+    for opt in options:
+        opt_l = opt.lower()
+        if val_lower in opt_l or opt_l in val_lower:
+            return opt
+
+    # 3. Numeric range overlap
+    val_nums = [int(n.replace(",", "")) for n in _re.findall(r"[\d,]+", value) if n.replace(",", "").isdigit()]
+    if val_nums:
+        val_lo = val_nums[0]
+        val_hi = val_nums[-1] if len(val_nums) > 1 else val_lo
+        best_opt = None
+        best_dist = float("inf")
+        for opt in options:
+            opt_nums = [int(n.replace(",", "")) for n in _re.findall(r"[\d,]+", opt) if n.replace(",", "").isdigit()]
+            if len(opt_nums) >= 2:
+                opt_lo, opt_hi = opt_nums[0], opt_nums[-1]
+                # Check if our range overlaps with this option's range
+                if opt_lo <= val_hi and opt_hi >= val_lo:
+                    dist = abs(opt_lo - val_lo)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_opt = opt
+            elif len(opt_nums) == 1:
+                dist = abs(opt_nums[0] - val_lo)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_opt = opt
+        if best_opt and best_dist < 10_000:
+            return best_opt
+
+    return None
+
+
+def _raw_profile_value(field: FieldInfo, profile: dict) -> str | None:
+    """Return the raw profile value for a field label, without any select validation."""
+    label_lower = field.label.lower().strip()
+    for key, resolver in _PROFILE_FIELD_MAP.items():
+        if key in label_lower and resolver is not None:
+            value = resolver(profile)
+            return value if value else None
+    return None
+
+
 def _lookup_from_profile(field: FieldInfo, profile: dict) -> str | None:
     label_lower = field.label.lower().strip()
     for key, resolver in _PROFILE_FIELD_MAP.items():
@@ -66,38 +129,27 @@ def _lookup_from_profile(field: FieldInfo, profile: dict) -> str | None:
             value = resolver(profile)
             if not value:
                 return None
-            # For select fields, validate the value matches one of the available options.
-            # If not, return None so the caller falls through to LLM with the options context.
+            # For select fields, find the closest matching option.
             if field.field_type == "select" and field.options:
-                options_lower = [o.lower() for o in field.options]
-                if value.lower() not in options_lower:
-                    log.debug(
-                        "[profile] select value %r not in options for label=%r — falling through",
-                        value, field.label,
-                    )
-                    return None
+                matched = _best_select_match(value, field.options)
+                if matched:
+                    log.debug("[profile] select matched %r → %r for label=%r", value, matched, field.label)
+                    return matched
+                log.debug("[profile] select value %r no match in options for label=%r — falling through", value, field.label)
+                return None
             return value
     return None
 
 
-# ── 2. Memory lookup ───────────────────────────────────────────────────────
+# ── 2. Cache lookup ────────────────────────────────────────────────────────
 
-def _question_fingerprint(text: str) -> str:
-    return hashlib.md5(text.lower().strip().encode()).hexdigest()
-
-
-async def _lookup_from_memory(
-    field: FieldInfo, conn
+async def _lookup_from_cache(
+    field: FieldInfo, cache: SqliteQuestionCacheRepository | None
 ) -> str | None:
-    """Look up a previously approved answer from question_answers table."""
-    fingerprint = _question_fingerprint(field.label)
-    async with conn.execute(
-        "SELECT answer_text FROM question_answers WHERE question_fingerprint = ? "
-        "AND approved_by_user = 1 ORDER BY last_used_at DESC LIMIT 1",
-        (fingerprint,),
-    ) as cur:
-        row = await cur.fetchone()
-    return row[0] if row else None
+    """Look up a previously human-approved answer by token overlap."""
+    if cache is None:
+        return None
+    return await cache.find(field.label)
 
 
 # ── 3. LLM call ────────────────────────────────────────────────────────────
@@ -107,6 +159,7 @@ async def _resolve_via_llm(
     profile: dict,
     settings: Settings,
     cover_letter: str,
+    profile_hint: str | None = None,
 ) -> tuple[str, float]:
     """Returns (answer, confidence) where confidence is 0.0–1.0."""
     client = AsyncOpenAI(base_url=settings.openai_base_url, api_key=settings.openai_api_key)
@@ -165,7 +218,7 @@ Key achievements:
 {narrative_block}
 
 Cover letter excerpt: {cover_letter[:400] if cover_letter else 'N/A'}
-
+{f"Candidate's stated preference for this field: {profile_hint}" if profile_hint else ""}
 Answer this field truthfully for the candidate. Return only JSON."""
 
     response = await client.chat.completions.create(
@@ -192,7 +245,7 @@ async def propose_field_values(
     profile: dict,
     cover_letter: str,
     settings: Settings,
-    db_conn,
+    question_cache: SqliteQuestionCacheRepository | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """
     Returns (proposed_values, low_confidence_ids).
@@ -253,11 +306,15 @@ async def propose_field_values(
             log.debug("[field:%s] label=%r → profile value=%r", field.id, field.label, value)
             continue
 
-        # 2. Memory lookup
-        value = await _lookup_from_memory(field, db_conn)
+        # Capture the raw profile preference so the LLM can use it as a hint if we fall through.
+        # (e.g. profile says "$180,000-$200,000" but select options don't match exactly)
+        profile_hint = _raw_profile_value(field, profile)
+
+        # 2. Cache lookup
+        value = await _lookup_from_cache(field, question_cache)
         if value:
             proposed[field.id] = value
-            log.debug("[field:%s] label=%r → memory value=%r", field.id, field.label, value)
+            log.debug("[field:%s] label=%r → cache value=%r", field.id, field.label, value)
             continue
 
         # 2b. Skill checkbox — resolve Yes/No directly from profile skills (no LLM)
@@ -268,8 +325,8 @@ async def propose_field_values(
             log.debug("[field:%s] label=%r → skill_check=%r", field.id, field.label, answer)
             continue
 
-        # 3. LLM
-        value, confidence = await _resolve_via_llm(field, profile, settings, cover_letter)
+        # 3. LLM — pass the profile hint so it doesn't guess freely
+        value, confidence = await _resolve_via_llm(field, profile, settings, cover_letter, profile_hint=profile_hint)
         proposed[field.id] = value
         if confidence < LOW_CONFIDENCE_THRESHOLD:
             low_confidence.append(field.id)

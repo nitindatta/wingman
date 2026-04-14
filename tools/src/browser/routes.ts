@@ -7,11 +7,19 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import { existsSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { ok, error, type ToolResponse } from '../envelope.js';
 import { createSession, getSession, closeSession } from './sessions.js';
 import { inspectStep, type StepInfo } from './inspector.js';
 import { saveSnapshot } from './snapshot.js';
+import { getOrLaunchChrome, getProfileDir } from './chrome.js';
+
+const PROVIDER_LOGIN_URLS: Record<string, string> = {
+  seek: 'https://www.seek.com.au/oauth/login/',
+  linkedin: 'https://www.linkedin.com/login',
+};
 
 function sessionError(key: string) {
   return error('session_not_found', `no active session for key ${key}`);
@@ -307,6 +315,47 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
 
     const closed = await closeSession(parsed.data.session_key);
     return ok({ closed });
+  });
+
+  // ── open_for_login ────────────────────────────────────────────────────────
+  // Opens the dedicated browser profile and navigates to the provider login page.
+  // The user logs in manually; their session cookies are saved to the profile dir.
+  app.post('/tools/browser/open_for_login', async (request) => {
+    const parsed = z.object({ provider: z.string().min(1) }).safeParse(request.body);
+    if (!parsed.success) return error('bad_request', parsed.error.message);
+
+    const loginUrl = PROVIDER_LOGIN_URLS[parsed.data.provider];
+    if (!loginUrl) {
+      return error('unknown_provider', `No login URL known for provider: ${parsed.data.provider}`);
+    }
+
+    try {
+      const context = await getOrLaunchChrome();
+      const page = await context.newPage();
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+      // Don't close the page — leave it open so the user can log in
+      return ok({ provider: parsed.data.provider, login_url: loginUrl, profile_dir: getProfileDir() });
+    } catch (err) {
+      return error('launch_failed', String(err));
+    }
+  });
+
+  // ── setup_status ──────────────────────────────────────────────────────────
+  // Returns whether the browser profile directory exists and has stored cookies.
+  app.get('/tools/setup/status', async () => {
+    const profileDir = getProfileDir();
+    const profileExists = existsSync(profileDir);
+
+    // Chrome stores cookies at Default/Network/Cookies (Chromium) or Default/Cookies
+    const cookiePaths = [
+      path.join(profileDir, 'Default', 'Network', 'Cookies'),
+      path.join(profileDir, 'Default', 'Cookies'),
+    ];
+    const hasCookies = cookiePaths.some((p) => {
+      try { return existsSync(p) && statSync(p).size > 4096; } catch { return false; }
+    });
+
+    return ok({ profile_dir: profileDir, profile_exists: profileExists, has_cookies: hasCookies });
   });
 
   // ── start_apply (provider tool) ───────────────────────────────────────────

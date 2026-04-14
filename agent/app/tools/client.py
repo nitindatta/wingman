@@ -40,6 +40,17 @@ class ToolClient:
             )
         return ToolEnvelope.model_validate(response.json())
 
+    async def call_get(self, path: str) -> ToolEnvelope:
+        try:
+            response = await self._client.get(path)
+        except httpx.RequestError as exc:
+            raise ToolServiceError(f"tools/ service unreachable: {exc}") from exc
+        if response.status_code >= 500:
+            raise ToolServiceError(
+                f"tools/ service returned HTTP {response.status_code}: {response.text}"
+            )
+        return ToolEnvelope.model_validate(response.json())
+
     async def health(self) -> ToolEnvelope:
         try:
             response = await self._client.get("/health")

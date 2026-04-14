@@ -95,6 +95,7 @@ async def _handle_apply_or_resume(item: Any, app_state: Any) -> None:
             app_state.database.connection,
             application_id=app_id,
             workflow_run_id=run_id,
+            question_cache=app_state.question_cache_repository,
         )
     else:  # resume
         payload = item.payload
@@ -110,6 +111,7 @@ async def _handle_apply_or_resume(item: Any, app_state: Any) -> None:
             approved_values=payload.get("approved_values", {}),
             action_label=payload.get("action_label", "Continue"),
             action=payload.get("action", "continue"),
+            question_cache=app_state.question_cache_repository,
         )
 
     # Build response and persist it so portal can poll

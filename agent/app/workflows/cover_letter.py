@@ -28,6 +28,10 @@ _TITLE_WORDS = {
     "recruiter", "recruitment", "manager", "team", "hr", "hiring",
     "talent", "acquisition", "coordinator", "specialist", "officer",
     "department", "admin", "administrator", "contact", "enquiries",
+    # executive titles — not someone to address a cover letter to
+    "ceo", "cto", "coo", "cfo", "founder", "co-founder", "director",
+    "president", "executive", "vp", "vice", "principal", "owner",
+    "head", "chief", "partner",
 }
 
 def _is_real_name(value: str) -> bool:
@@ -139,8 +143,11 @@ def build_cover_letter_graph(settings: Settings) -> Any:
                         "Include years of experience, specific tools, technical skills, domain knowledge. "
                         "duties: what the person will actually do in the role day-to-day. "
                         "nice_to_have: bonus, preferred, or optional items explicitly marked as such. "
-                        'contact_name: ONLY a real person\'s name (e.g. "Jane Smith" or "Jane") if explicitly named in the JD. '
-                        'If only a job title, team name, or email address is given (e.g. "contact our Talent team", "ask the recruiter"), use "". '
+                        'contact_name: ONLY the name of the hiring manager or recruiter for THIS specific role — '
+                        'someone you would address the cover letter to. '
+                        'Use "" if the person mentioned is a CEO, founder, executive, or is named in a company bio, '
+                        'award mention, or "About Us" context rather than as the contact for applicants. '
+                        'Use "" if only a job title, team name, or email is given. '
                         "Return ONLY the JSON object."
                     ),
                 },

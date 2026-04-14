@@ -350,16 +350,34 @@ function GatePanel({ appStep, gateAnswers, setGateAnswers, onSubmit, isPending, 
 
 function AwaitingSubmitPanel({ appStep, onSubmit, onCancel, isPendingSubmit, isPendingCancel, appId, error }: {
   appStep: ApplyStepResponse;
-  onSubmit: () => void;
+  onSubmit: (correctedValues: Record<string, string>) => void;
   onCancel: (appId: string) => void;
   isPendingSubmit: boolean;
   isPendingCancel: boolean;
   appId: string;
   error: string | null;
 }) {
+  // edits keyed by field label (label is stable, id can be synthetic)
+  const [edits, setEdits] = useState<Record<string, string>>({});
+
+  const setEdit = (label: string, value: string) =>
+    setEdits((prev) => ({ ...prev, [label]: value }));
+
+  const hasEdits = Object.keys(edits).length > 0;
+
   return (
     <div style={{ marginTop: "1rem" }}>
-      <h3 style={{ margin: "0 0 1rem" }}>Review Filled Answers</h3>
+      <div style={{ display: "flex", alignItems: "baseline", gap: "0.75rem", marginBottom: "1rem" }}>
+        <h3 style={{ margin: 0 }}>Review Filled Answers</h3>
+        <span style={{ fontSize: 12, color: "#6b7280" }}>Click a value to correct it</span>
+      </div>
+
+      {hasEdits && (
+        <div style={{ marginBottom: "1rem", padding: "0.6rem 0.875rem", background: "#fefce8", border: "1px solid #fde047", borderRadius: 6, fontSize: 12, color: "#713f12" }}>
+          Corrections will be saved for future applications. The current SEEK submission uses the originally filled values.
+        </div>
+      )}
+
       {appStep.step_history.map((entry, si) => {
         const fields: Array<{ id: string; label: string }> = entry.step.fields ?? [];
         const filled: Record<string, string> = entry.filled_values ?? {};
@@ -367,64 +385,66 @@ function AwaitingSubmitPanel({ appStep, onSubmit, onCancel, isPendingSubmit, isP
         if (rows.length === 0) return null;
         return (
           <div key={si} style={{ marginBottom: "1rem" }}>
-            <div
-              style={{
-                padding: "0.4rem 0.75rem",
-                background: "#f3f4f6",
-                borderRadius: "6px 6px 0 0",
-                fontSize: 12,
-                color: "#6b7280",
-                fontWeight: 500,
-              }}
-            >
-              Step {si + 1} · {entry.step.page_url}
+            <div style={{ padding: "0.4rem 0.75rem", background: "#f3f4f6", borderRadius: "6px 6px 0 0", fontSize: 12, color: "#6b7280", fontWeight: 500 }}>
+              Step {si + 1}
             </div>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13, border: "1px solid #e5e7eb", borderTop: "none" }}>
               <tbody>
-                {rows.map((f, ri) => (
-                  <tr key={f.id} style={{ background: ri % 2 === 0 ? "#fff" : "#f9fafb" }}>
-                    <td style={{ padding: "0.5rem 0.75rem", color: "#374151", fontWeight: 500, width: "40%", borderBottom: "1px solid #f3f4f6" }}>
-                      {f.label}
-                    </td>
-                    <td style={{ padding: "0.5rem 0.75rem", color: "#6b7280", borderBottom: "1px solid #f3f4f6" }}>
-                      {filled[f.id]}
-                    </td>
-                  </tr>
-                ))}
+                {rows.map((f, ri) => {
+                  const original = filled[f.id];
+                  const edited = edits[f.label];
+                  const isEdited = edited !== undefined && edited !== original;
+                  return (
+                    <tr key={f.id} style={{ background: ri % 2 === 0 ? "#fff" : "#f9fafb" }}>
+                      <td style={{ padding: "0.5rem 0.75rem", color: "#374151", fontWeight: 500, width: "38%", borderBottom: "1px solid #f3f4f6", verticalAlign: "middle" }}>
+                        {f.label}
+                      </td>
+                      <td style={{ padding: "0.35rem 0.75rem", borderBottom: "1px solid #f3f4f6" }}>
+                        <input
+                          type="text"
+                          defaultValue={original}
+                          onChange={(e) => setEdit(f.label, e.target.value)}
+                          style={{
+                            width: "100%",
+                            border: isEdited ? "1px solid #f59e0b" : "1px solid transparent",
+                            background: isEdited ? "#fffbeb" : "transparent",
+                            borderRadius: 4,
+                            padding: "0.25rem 0.4rem",
+                            fontSize: 13,
+                            color: isEdited ? "#92400e" : "#6b7280",
+                            outline: "none",
+                            cursor: "text",
+                            boxSizing: "border-box",
+                          }}
+                          onFocus={(e) => {
+                            if (!isEdited) e.target.style.border = "1px solid #d1d5db";
+                          }}
+                          onBlur={(e) => {
+                            if (!isEdited) e.target.style.border = "1px solid transparent";
+                          }}
+                        />
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         );
       })}
+
       <div style={{ display: "flex", gap: "0.75rem", marginTop: "1.5rem" }}>
         <button
-          onClick={onSubmit}
+          onClick={() => onSubmit(edits)}
           disabled={isPendingSubmit}
-          style={{
-            padding: "0.5rem 1.5rem",
-            background: "#7c3aed",
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            cursor: isPendingSubmit ? "not-allowed" : "pointer",
-            fontSize: 14,
-            fontWeight: 600,
-          }}
+          style={{ padding: "0.5rem 1.5rem", background: "#7c3aed", color: "#fff", border: "none", borderRadius: 6, cursor: isPendingSubmit ? "not-allowed" : "pointer", fontSize: 14, fontWeight: 600 }}
         >
           {isPendingSubmit ? "Submitting…" : "Submit to SEEK"}
         </button>
         <button
           onClick={() => onCancel(appId)}
           disabled={isPendingCancel}
-          style={{
-            padding: "0.5rem 1.25rem",
-            background: "#fff",
-            color: "#374151",
-            border: "1px solid #d1d5db",
-            borderRadius: 6,
-            cursor: isPendingCancel ? "not-allowed" : "pointer",
-            fontSize: 14,
-          }}
+          style={{ padding: "0.5rem 1.25rem", background: "#fff", color: "#374151", border: "1px solid #d1d5db", borderRadius: 6, cursor: isPendingCancel ? "not-allowed" : "pointer", fontSize: 14 }}
         >
           Cancel
         </button>
@@ -555,8 +575,8 @@ export default function ReviewDeskPage() {
   });
 
   const submitMutation = useMutation({
-    mutationFn: ({ appId, runId, label }: { appId: string; runId: string; label: string }) =>
-      enqueueSubmit(appId, runId, label),
+    mutationFn: ({ appId, runId, label, correctedValues }: { appId: string; runId: string; label: string; correctedValues?: Record<string, string> }) =>
+      enqueueSubmit(appId, runId, label, correctedValues),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["applications"] });
       queryClient.invalidateQueries({ queryKey: ["applicationDetail", selectedAppId] });
@@ -842,8 +862,10 @@ export default function ReviewDeskPage() {
         );
       }
 
-      // auth_required or other paused
+      // auth_required | session_lost | other paused
+      const pauseReason = parsedApplyStep?.pause_reason ?? null;
       const isAuth = pageType === "auth_required";
+      const isSessionLost = pauseReason === "session_lost";
       const pageUrl = parsedApplyStep?.step?.page_url;
       return (
         <>
@@ -857,10 +879,12 @@ export default function ReviewDeskPage() {
             }}
           >
             <p style={{ fontWeight: 600, margin: "0 0 0.5rem", color: "#92400e", fontSize: 15 }}>
-              {isAuth ? "SEEK session expired" : "Application workflow paused"}
+              {isSessionLost ? "Browser session lost" : isAuth ? "SEEK session expired" : "Application workflow paused"}
             </p>
             <p style={{ margin: "0 0 1rem", color: "#78350f", fontSize: 14 }}>
-              {isAuth
+              {isSessionLost
+                ? "The tools service was restarted and the browser session was lost. Click Re-approve to start the application again from scratch."
+                : isAuth
                 ? "You need to log back in to SEEK. Open SEEK in a browser, log in, then click Try Again."
                 : `Unexpected page encountered (${pageType ?? "unknown"}). You can try again or discard this application.`}
             </p>
@@ -875,7 +899,7 @@ export default function ReviewDeskPage() {
                 disabled={approveMutation.isPending}
                 style={{ padding: "0.5rem 1.25rem", background: "#2563eb", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer", fontSize: 14 }}
               >
-                Try Again
+                {isSessionLost ? "Re-approve" : "Try Again"}
               </button>
               <button
                 onClick={() => discardMutation.mutate(appId)}
@@ -917,7 +941,7 @@ export default function ReviewDeskPage() {
           {header}
           <AwaitingSubmitPanel
             appStep={parsedApplyStep}
-            onSubmit={() => submitMutation.mutate({ appId, runId: parsedApplyStep.workflow_run_id, label: parsedApplyStep.submit_action_label ?? "Submit Application" })}
+            onSubmit={(correctedValues) => submitMutation.mutate({ appId, runId: parsedApplyStep.workflow_run_id, label: parsedApplyStep.submit_action_label ?? "Submit Application", correctedValues })}
             onCancel={(id) => approveMutation.mutate({ appId: id, coverLetter: coverLetterText })}
             isPendingSubmit={submitMutation.isPending}
             isPendingCancel={approveMutation.isPending}

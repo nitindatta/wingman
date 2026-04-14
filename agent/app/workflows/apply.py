@@ -28,6 +28,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from app.persistence.sqlite.applications import SqliteApplicationRepository, SqliteDraftRepository
+from app.persistence.sqlite.question_cache import SqliteQuestionCacheRepository
 from app.persistence.sqlite.workflow_runs import SqliteWorkflowRunRepository, SqliteBrowserSessionRepository
 from app.services.answer_field import propose_field_values
 from app.settings import Settings
@@ -50,6 +51,15 @@ def _load_profile(settings: Settings) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _is_session_lost(env) -> bool:
+    """Return True if the tools envelope signals a missing browser session."""
+    return (
+        env is not None
+        and env.error is not None
+        and env.error.type == "session_not_found"
+    )
+
+
 def build_apply_graph(
     settings: Settings,
     tool_client: ToolClient,
@@ -58,8 +68,63 @@ def build_apply_graph(
     run_repo: SqliteWorkflowRunRepository,
     session_repo: SqliteBrowserSessionRepository,
     db_conn: aiosqlite.Connection,
+    question_cache: SqliteQuestionCacheRepository | None = None,
 ):
     profile = _load_profile(settings)
+
+    # ── session recovery ───────────────────────────────────────────────────
+    async def _recover_session(state: "ApplyState") -> str | None:
+        """Re-launch a browser session and silently replay step_history.
+
+        Called when the tools service has restarted and the original session_key
+        is no longer valid. Replays every previously-filled step so the browser
+        ends up at the same page the workflow was on before.
+
+        Returns the new session_key, or None if recovery failed.
+        """
+        app = await app_repo.get(state.application_id)
+        if app is None:
+            log.warning("[recover] application not found: %s", state.application_id)
+            return None
+
+        try:
+            new_key = await launch_session(tool_client, provider="seek")
+            log.info("[recover] new session_key=%s — replaying %d history steps",
+                     new_key, len(state.step_history))
+        except (BrowserToolError, ToolServiceError) as exc:
+            log.warning("[recover] launch_session failed: %s", exc)
+            return None
+
+        try:
+            env = await tool_client.call(
+                "/tools/providers/start_apply",
+                {"session_key": new_key, "provider": "seek", "job_url": app.source_url},
+            )
+            if env.status not in ("ok",):
+                log.warning("[recover] start_apply returned status=%s", env.status)
+                await close_session(tool_client, new_key)
+                return None
+
+            for i, entry in enumerate(state.step_history):
+                filled = entry.get("filled_values", {})
+                _step, fill_env = await fill_and_continue(
+                    tool_client, new_key, filled, action_label="Continue"
+                )
+                if _is_session_lost(fill_env):
+                    log.warning("[recover] session lost again during replay at step %d", i)
+                    return None
+                log.debug("[recover] replayed step %d/%d", i + 1, len(state.step_history))
+
+            log.info("[recover] session recovery complete — new session_key=%s", new_key)
+            return new_key
+
+        except Exception as exc:
+            log.warning("[recover] replay failed: %s", exc)
+            try:
+                await close_session(tool_client, new_key)
+            except Exception:
+                pass
+            return None
 
     # ── launch ─────────────────────────────────────────────────────────────
     async def node_launch(state: ApplyState) -> dict[str, Any]:
@@ -150,6 +215,17 @@ def build_apply_graph(
             return {"status": "failed", "error": str(exc)}
 
         if step is None:
+            if _is_session_lost(env):
+                log.warning("[inspect] session_not_found — attempting recovery")
+                new_key = await _recover_session(state)
+                if new_key:
+                    step, env = await inspect_apply_step(tool_client, new_key)
+                    if step:
+                        log.info("[inspect] recovery succeeded — new session_key=%s", new_key)
+                        return {"session_key": new_key, "current_step": step}
+                log.warning("[inspect] recovery failed — pausing")
+                return {"status": "paused", "pause_reason": "session_lost",
+                        "error": "Browser session was lost (service restarted). Re-approve to start again."}
             log.warning("[inspect] drift — env.status=%s", env.status)
             return {
                 "status": "paused",
@@ -197,7 +273,7 @@ def build_apply_graph(
             profile=profile,
             cover_letter=cover_letter,
             settings=settings,
-            db_conn=db_conn,
+            question_cache=question_cache,
         )
 
         log.info("[propose] done: proposed=%d low_confidence=%s", len(proposed), low_conf_ids)
@@ -239,6 +315,19 @@ def build_apply_graph(
             return {"status": "failed", "error": str(exc)}
 
         if next_step is None:
+            if _is_session_lost(env):
+                log.warning("[submit] session_not_found — attempting recovery")
+                new_key = await _recover_session(state)
+                if new_key:
+                    next_step, env = await fill_and_continue(
+                        tool_client, new_key, {}, action_label=state.submit_action_label
+                    )
+                    if next_step is not None:
+                        log.info("[submit] recovery succeeded — new session_key=%s", new_key)
+                        return {"session_key": new_key, "current_step": next_step, "status": "completed"}
+                log.warning("[submit] recovery failed — pausing")
+                return {"status": "paused", "pause_reason": "session_lost",
+                        "error": "Browser session was lost (service restarted). Re-approve to start again."}
             log.error("[submit] error or drift after submit: %s", env.status)
             err = env.error
             return {"status": "failed", "error": f"{err.type}: {err.message}" if err else "drift after submit"}
@@ -277,6 +366,26 @@ def build_apply_graph(
         new_history = list(state.step_history) + [history_entry]
 
         if next_step is None:
+            if _is_session_lost(env):
+                log.warning("[fill] session_not_found — attempting recovery")
+                new_key = await _recover_session(state)
+                if new_key:
+                    next_step, env = await fill_and_continue(
+                        tool_client, new_key, state.proposed_values, action_label=state.action_label
+                    )
+                    if next_step is not None:
+                        log.info("[fill] recovery succeeded — new session_key=%s", new_key)
+                        # fall through to normal next_step handling below with updated key
+                        return {
+                            "session_key": new_key,
+                            "current_step": next_step,
+                            "step_history": new_history,
+                            **({"status": "completed"} if next_step.page_type == "confirmation" else {}),
+                        }
+                log.warning("[fill] recovery failed — pausing")
+                return {"status": "paused", "pause_reason": "session_lost",
+                        "error": "Browser session was lost (service restarted). Re-approve to start again.",
+                        "step_history": new_history}
             if env.status == "error":
                 log.error("[fill] error after fill: %s", env.error)
                 err = env.error
@@ -436,10 +545,11 @@ async def run_apply(
     *,
     application_id: str,
     workflow_run_id: str,
+    question_cache: SqliteQuestionCacheRepository | None = None,
 ) -> ApplyState:
     """Start a new apply workflow run. Runs until first interrupt (gate) or terminal state."""
     graph_builder = build_apply_graph(
-        settings, tool_client, app_repo, draft_repo, run_repo, session_repo, db_conn
+        settings, tool_client, app_repo, draft_repo, run_repo, session_repo, db_conn, question_cache
     )
     checkpointer = AsyncSqliteSaver(db_conn)
     graph = _make_compiled(graph_builder, checkpointer)
@@ -466,10 +576,11 @@ async def resume_apply(
     approved_values: dict[str, str],
     action_label: str = "Continue",
     action: str = "continue",  # "continue" | "abort"
+    question_cache: SqliteQuestionCacheRepository | None = None,
 ) -> ApplyState:
     """Resume a paused workflow run with user-approved values."""
     graph_builder = build_apply_graph(
-        settings, tool_client, app_repo, draft_repo, run_repo, session_repo, db_conn
+        settings, tool_client, app_repo, draft_repo, run_repo, session_repo, db_conn, question_cache
     )
     checkpointer = AsyncSqliteSaver(db_conn)
     graph = _make_compiled(graph_builder, checkpointer)

@@ -45,10 +45,11 @@ export async function enqueueSubmit(
   appId: string,
   runId: string,
   label: string,
+  correctedValues?: Record<string, string>,
 ): Promise<void> {
   await apiFetch<unknown>(`/applications/${appId}/submit`, {
     method: "POST",
-    body: JSON.stringify({ run_id: runId, label }),
+    body: JSON.stringify({ run_id: runId, label, corrected_values: correctedValues ?? {} }),
   });
 }
 

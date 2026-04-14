@@ -148,6 +148,7 @@ def _apply_response(state) -> ApplyStepResponse:
         submit_action_label=state.submit_action_label,
         step_history=state.step_history,
         error=state.error,
+        pause_reason=state.pause_reason,
     )
 
 

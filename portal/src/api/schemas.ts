@@ -148,6 +148,7 @@ export const applyStepResponseSchema = z.object({
   submit_action_label: z.string().optional().default("Continue"),
   step_history: z.array(stepHistoryEntrySchema).optional().default([]),
   error: z.string().nullable().optional(),
+  pause_reason: z.string().nullable().optional(),
 });
 export type ApplyStepResponse = z.infer<typeof applyStepResponseSchema>;
 

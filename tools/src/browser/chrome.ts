@@ -2,22 +2,36 @@ import { chromium, type BrowserContext } from 'playwright-core';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 
 /**
  * Singleton Chrome launcher.
  *
- * Uses launchPersistentContext with a fixed profile dir so SEEK (and other
- * provider) cookies survive across apply sessions. Only ONE context can be
- * open at a time per profile dir (Chrome's SingletonLock). We keep it alive
- * for the lifetime of the tools service and create new pages per session.
+ * Uses launchPersistentContext with a dedicated profile directory so provider
+ * login cookies (SEEK, LinkedIn, etc.) persist across sessions without
+ * touching the user's personal Chrome profile.
+ *
+ * Profile dir is resolved from BROWSER_PROFILE_DIR env var, falling back to
+ * ../automation/browser-profile relative to the tools/ working directory.
  */
 
 const CHROME_CANDIDATES = [
+  // Windows
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  // macOS
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  // Linux
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium-browser',
+  '/usr/bin/chromium',
 ];
 
-const DEFAULT_PROFILE_DIR = path.resolve(process.cwd(), '.chrome-profile');
+const DEFAULT_PROFILE_DIR = process.env.BROWSER_PROFILE_DIR
+  ? path.resolve(process.env.BROWSER_PROFILE_DIR)
+  : path.resolve(process.cwd(), '..', 'automation', 'browser-profile');
 
 export type ChromeLaunchOptions = {
   profileDir?: string;
@@ -49,8 +63,8 @@ export async function getOrLaunchChrome(options: ChromeLaunchOptions = {}): Prom
   const executablePath = CHROME_CANDIDATES.find((p) => existsSync(p));
   if (!executablePath) {
     throw new Error(
-      `Could not find chrome.exe. Checked: ${CHROME_CANDIDATES.join(', ')}. ` +
-        'This launcher must run on Windows with Google Chrome installed.',
+      `Could not find Google Chrome. Checked:\n  ${CHROME_CANDIDATES.join('\n  ')}\n` +
+        'Please install Google Chrome and try again.',
     );
   }
 

@@ -51,8 +51,9 @@ node/playwright-report/
 applications/
 jobs/
 
-# Playwright persistent Chrome profile
+# Playwright persistent Chrome profile (dedicated Envoy profile, separate from personal Chrome)
 tools/.chrome-profile/
+automation/browser-profile/
 .cla*
 logs/
 # Personal profile data — keep local only

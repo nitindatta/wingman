@@ -67,6 +67,7 @@ class ApplyStepResponse(BaseModel):
     submit_action_label: str = "Continue"
     step_history: list[dict] = Field(default_factory=list)
     error: str | None = None
+    pause_reason: str | None = None
 
 
 class ApplyResumeRequest(BaseModel):

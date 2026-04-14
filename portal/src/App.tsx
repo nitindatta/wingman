@@ -7,6 +7,7 @@ import ReviewDeskPage from "./pages/ReviewDeskPage";
 import HistoryPage from "./pages/HistoryPage";
 import SettingsPage from "./pages/SettingsPage";
 import DriftPage from "./pages/DriftPage";
+import SetupPage from "./pages/SetupPage";
 
 const navItems = [
   { to: "/", label: "Jobs", end: true },
@@ -15,7 +16,7 @@ const navItems = [
   { to: "/review", label: "Review" },
   { to: "/history", label: "History" },
   { to: "/drift", label: "Drift" },
-  { to: "/settings", label: "Settings" },
+  { to: "/setup", label: "Setup" },
 ];
 
 export default function App() {
@@ -47,6 +48,7 @@ export default function App() {
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/drift" element={<DriftPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/setup" element={<SetupPage />} />
         </Routes>
       </main>
     </div>

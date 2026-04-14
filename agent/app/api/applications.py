@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.persistence.sqlite.applications import SqliteApplicationRepository, SqliteDraftRepository
+
+log = logging.getLogger("applications")
 
 router = APIRouter()
 
@@ -150,10 +155,29 @@ async def enqueue_gate_resume(app_id: str, request: Request, body: GateResumeReq
     """Enqueue a resume after the HITL gate (user approved field values)."""
     repo: SqliteApplicationRepository = request.app.state.application_repository
     queue_repo = request.app.state.queue_repository
+    cache_repo = request.app.state.question_cache_repository
 
     app = await repo.get(app_id)
     if app is None:
         raise HTTPException(status_code=404, detail="application not found")
+
+    # Save human-approved answers to cache using field labels from last_apply_step_json
+    if body.approved_values and app.last_apply_step_json:
+        try:
+            step = json.loads(app.last_apply_step_json)
+            fields_by_id = {
+                f["id"]: f
+                for f in (step.get("step", {}) or {}).get("fields", [])
+            }
+            for field_id, answer in body.approved_values.items():
+                field_meta = fields_by_id.get(field_id)
+                label = field_meta["label"] if field_meta else field_id
+                field_type = field_meta["field_type"] if field_meta else None
+                if label and answer:
+                    await cache_repo.save(label, answer, field_type=field_type)
+                    log.info("[gate] cached answer for label=%r answer=%r", label, answer)
+        except Exception:
+            log.exception("[gate] failed to save answers to cache — continuing")
 
     await repo.update_state(app_id, "applying")
     await queue_repo.enqueue("resume", app_id, {
@@ -168,6 +192,7 @@ async def enqueue_gate_resume(app_id: str, request: Request, body: GateResumeReq
 class SubmitRequest(BaseModel):
     run_id: str
     label: str = "Continue"
+    corrected_values: dict[str, str] = {}  # field_label → corrected answer
 
 
 @router.post("/applications/{app_id}/submit", response_model=dict)
@@ -175,10 +200,29 @@ async def enqueue_submit(app_id: str, request: Request, body: SubmitRequest):
     """Enqueue a final submit resume (user confirmed they want to submit to SEEK)."""
     repo: SqliteApplicationRepository = request.app.state.application_repository
     queue_repo = request.app.state.queue_repository
+    cache_repo = request.app.state.question_cache_repository
 
     app = await repo.get(app_id)
     if app is None:
         raise HTTPException(status_code=404, detail="application not found")
+
+    # Save user-corrected values to cache so future applications use them.
+    # These are keyed by field label (not id) — the portal sends label→value pairs.
+    if body.corrected_values and app.last_apply_step_json:
+        try:
+            step_data = json.loads(app.last_apply_step_json)
+            # Build a label→field_type map from all steps in step_history
+            field_types: dict[str, str] = {}
+            for entry in (step_data.get("step_history") or []):
+                for f in (entry.get("step", {}).get("fields") or []):
+                    if f.get("label"):
+                        field_types[f["label"]] = f.get("field_type", "text")
+            for label, answer in body.corrected_values.items():
+                if label and answer:
+                    await cache_repo.save(label, answer, field_type=field_types.get(label))
+                    log.info("[submit] cached corrected answer label=%r answer=%r", label, answer)
+        except Exception:
+            log.exception("[submit] failed to save corrected answers to cache — continuing")
 
     await repo.update_state(app_id, "submitting")
     await queue_repo.enqueue("resume", app_id, {
