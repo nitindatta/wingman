@@ -9,6 +9,7 @@ import {
   enqueueGate,
   enqueueSubmit,
   markSubmitted,
+  cancelApplication,
 } from "../api/applications";
 import { applyStepResponseSchema, type Application, type ApplyStepResponse } from "../api/schemas";
 
@@ -40,6 +41,16 @@ function relativeTime(iso: string): string {
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
   return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function elapsedTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const secs = Math.floor(diff / 1000);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ${secs % 60}s`;
+  const hrs = Math.floor(mins / 60);
+  return `${hrs}h ${mins % 60}m`;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +228,9 @@ function AppListItem({ app, selected, onClick }: {
         )}
         <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: 2 }}>
           <span style={{ fontSize: 11, color: meta.color, fontWeight: 500 }}>{meta.label}</span>
-          <span style={{ fontSize: 11, color: "#9ca3af" }}>· {relativeTime(app.updated_at)}</span>
+          <span style={{ fontSize: 11, color: "#9ca3af" }}>
+            · {isActive ? elapsedTime(app.updated_at) : relativeTime(app.updated_at)}
+          </span>
         </div>
       </div>
     </div>
@@ -379,7 +392,7 @@ function AwaitingSubmitPanel({ appStep, onSubmit, onCancel, isPendingSubmit, isP
       )}
 
       {appStep.step_history.map((entry, si) => {
-        const fields: Array<{ id: string; label: string }> = entry.step.fields ?? [];
+        const fields: Array<{ id: string; label: string; field_type?: string }> = entry.step.fields ?? [];
         const filled: Record<string, string> = entry.filled_values ?? {};
         const rows = fields.filter((f) => filled[f.id] !== undefined);
         if (rows.length === 0) return null;
@@ -399,30 +412,52 @@ function AwaitingSubmitPanel({ appStep, onSubmit, onCancel, isPendingSubmit, isP
                       <td style={{ padding: "0.5rem 0.75rem", color: "#374151", fontWeight: 500, width: "38%", borderBottom: "1px solid #f3f4f6", verticalAlign: "middle" }}>
                         {f.label}
                       </td>
-                      <td style={{ padding: "0.35rem 0.75rem", borderBottom: "1px solid #f3f4f6" }}>
-                        <input
-                          type="text"
-                          defaultValue={original}
-                          onChange={(e) => setEdit(f.label, e.target.value)}
-                          style={{
-                            width: "100%",
-                            border: isEdited ? "1px solid #f59e0b" : "1px solid transparent",
-                            background: isEdited ? "#fffbeb" : "transparent",
-                            borderRadius: 4,
-                            padding: "0.25rem 0.4rem",
-                            fontSize: 13,
-                            color: isEdited ? "#92400e" : "#6b7280",
-                            outline: "none",
-                            cursor: "text",
-                            boxSizing: "border-box",
-                          }}
-                          onFocus={(e) => {
-                            if (!isEdited) e.target.style.border = "1px solid #d1d5db";
-                          }}
-                          onBlur={(e) => {
-                            if (!isEdited) e.target.style.border = "1px solid transparent";
-                          }}
-                        />
+                      <td style={{ padding: "0.35rem 0.75rem", borderBottom: "1px solid #f3f4f6", verticalAlign: "top" }}>
+                        {f.field_type === "textarea" ? (
+                          <textarea
+                            defaultValue={original}
+                            onChange={(e) => setEdit(f.label, e.target.value)}
+                            rows={6}
+                            style={{
+                              width: "100%",
+                              border: isEdited ? "1px solid #f59e0b" : "1px solid #e5e7eb",
+                              background: isEdited ? "#fffbeb" : "#fff",
+                              borderRadius: 4,
+                              padding: "0.35rem 0.5rem",
+                              fontSize: 13,
+                              color: isEdited ? "#92400e" : "#374151",
+                              outline: "none",
+                              resize: "vertical",
+                              boxSizing: "border-box",
+                              lineHeight: 1.5,
+                              fontFamily: "inherit",
+                            }}
+                          />
+                        ) : (
+                          <input
+                            type="text"
+                            defaultValue={original}
+                            onChange={(e) => setEdit(f.label, e.target.value)}
+                            style={{
+                              width: "100%",
+                              border: isEdited ? "1px solid #f59e0b" : "1px solid transparent",
+                              background: isEdited ? "#fffbeb" : "transparent",
+                              borderRadius: 4,
+                              padding: "0.25rem 0.4rem",
+                              fontSize: 13,
+                              color: isEdited ? "#92400e" : "#6b7280",
+                              outline: "none",
+                              cursor: "text",
+                              boxSizing: "border-box",
+                            }}
+                            onFocus={(e) => {
+                              if (!isEdited) e.target.style.border = "1px solid #d1d5db";
+                            }}
+                            onBlur={(e) => {
+                              if (!isEdited) e.target.style.border = "1px solid transparent";
+                            }}
+                          />
+                        )}
                       </td>
                     </tr>
                   );
@@ -484,6 +519,7 @@ export default function ReviewDeskPage() {
     queryKey: ["applications"],
     queryFn: () => fetchApplications(),
     refetchInterval: 3000,
+    select: (data) => data.filter((a) => a.state !== "applied"),
   });
 
   const selectedApp = appsQuery.data?.find((a) => a.id === selectedAppId) ?? null;
@@ -591,6 +627,14 @@ export default function ReviewDeskPage() {
     },
   });
 
+  const cancelMutation = useMutation({
+    mutationFn: (appId: string) => cancelApplication(appId),
+    onSuccess: () => {
+      setSelectedAppId(null);
+      queryClient.invalidateQueries({ queryKey: ["applications"] });
+    },
+  });
+
   // ---------------------------------------------------------------------------
   // Right panel content
   // ---------------------------------------------------------------------------
@@ -655,6 +699,20 @@ export default function ReviewDeskPage() {
             message="Preparing application…"
             subtext="Analysing job description and generating cover letter. This takes about 30 seconds."
           />
+          <div style={{ marginTop: "1rem" }}>
+            <button
+              onClick={() => cancelMutation.mutate(appId)}
+              disabled={cancelMutation.isPending}
+              style={{ padding: "0.4rem 1rem", background: "#fff", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 6, cursor: cancelMutation.isPending ? "not-allowed" : "pointer", fontSize: 13 }}
+            >
+              {cancelMutation.isPending ? "Cancelling…" : "Cancel"}
+            </button>
+            {cancelMutation.isError && (
+              <span style={{ marginLeft: "0.75rem", color: "#dc2626", fontSize: 12 }}>
+                {cancelMutation.error instanceof Error ? cancelMutation.error.message : "Failed to cancel"}
+              </span>
+            )}
+          </div>
         </>
       );
     }
@@ -665,6 +723,20 @@ export default function ReviewDeskPage() {
         <>
           {header}
           <SpinnerPanel message="Applying…" subtext="Filling out the application form on SEEK. This may take a minute." />
+          <div style={{ marginTop: "1rem" }}>
+            <button
+              onClick={() => cancelMutation.mutate(appId)}
+              disabled={cancelMutation.isPending}
+              style={{ padding: "0.4rem 1rem", background: "#fff", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 6, cursor: cancelMutation.isPending ? "not-allowed" : "pointer", fontSize: 13 }}
+            >
+              {cancelMutation.isPending ? "Cancelling…" : "Cancel"}
+            </button>
+            {cancelMutation.isError && (
+              <span style={{ marginLeft: "0.75rem", color: "#dc2626", fontSize: 12 }}>
+                {cancelMutation.error instanceof Error ? cancelMutation.error.message : "Failed to cancel"}
+              </span>
+            )}
+          </div>
         </>
       );
     }
@@ -674,6 +746,20 @@ export default function ReviewDeskPage() {
         <>
           {header}
           <SpinnerPanel message="Submitting…" subtext="Submitting your application to SEEK." />
+          <div style={{ marginTop: "1rem" }}>
+            <button
+              onClick={() => cancelMutation.mutate(appId)}
+              disabled={cancelMutation.isPending}
+              style={{ padding: "0.4rem 1rem", background: "#fff", color: "#6b7280", border: "1px solid #d1d5db", borderRadius: 6, cursor: cancelMutation.isPending ? "not-allowed" : "pointer", fontSize: 13 }}
+            >
+              {cancelMutation.isPending ? "Cancelling…" : "Cancel"}
+            </button>
+            {cancelMutation.isError && (
+              <span style={{ marginLeft: "0.75rem", color: "#dc2626", fontSize: 12 }}>
+                {cancelMutation.error instanceof Error ? cancelMutation.error.message : "Failed to cancel"}
+              </span>
+            )}
+          </div>
         </>
       );
     }

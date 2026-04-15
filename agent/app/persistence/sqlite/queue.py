@@ -139,3 +139,22 @@ class SqliteQueueRepository:
             (now, error[:1000], item_id),
         )
         await self._conn.commit()
+
+    async def cancel_for_entity(self, entity_id: str) -> int:
+        """Mark all pending/processing queue items for entity_id as cancelled (failed).
+
+        Called when an application is cancelled by the user so the worker won't
+        pick up the item even if it hasn't started yet.
+        Returns number of items cancelled.
+        """
+        now = datetime.now(UTC).isoformat()
+        cursor = await self._conn.execute(
+            "UPDATE work_queue SET status='failed', finished_at=?, error='cancelled by user' "
+            "WHERE entity_id=? AND status IN ('pending','processing')",
+            (now, entity_id),
+        )
+        await self._conn.commit()
+        count = cursor.rowcount
+        if count:
+            log.info("[queue] cancelled %d item(s) for entity_id=%s", count, entity_id)
+        return count

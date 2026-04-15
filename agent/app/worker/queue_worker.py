@@ -24,13 +24,26 @@ async def run_prepare_worker(app_state: Any) -> None:
 
     Spawns up to `settings.worker_prepare_concurrency` concurrent prepare tasks.
     Each slot is released as soon as the task finishes so the next item can start.
+
+    Also runs reset_stale() every 5 minutes to auto-recover items stuck in
+    'processing' (e.g. after a crash mid-task).
     """
     concurrency = app_state.settings.worker_prepare_concurrency
     semaphore = asyncio.Semaphore(concurrency)
     log.info("[prepare-worker] started concurrency=%d", concurrency)
 
+    _stale_check_interval = 300  # seconds between stale checks
+    _last_stale_check = asyncio.get_event_loop().time()
+
     while True:
         try:
+            # Periodically reset stale processing items
+            now = asyncio.get_event_loop().time()
+            if now - _last_stale_check >= _stale_check_interval:
+                with contextlib.suppress(Exception):
+                    await app_state.queue_repository.reset_stale()
+                _last_stale_check = now
+
             # Only try to claim when a slot is free
             await semaphore.acquire()
 

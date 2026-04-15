@@ -338,20 +338,42 @@ def build_apply_graph(
             log.info("[submit] confirmed — application submitted")
             return {"current_step": next_step, "status": "completed"}
 
-        # 0-field form page after submit = still on the review/summary page.
-        # The button click didn't navigate — likely a timing issue.
-        # Pause so the user can retry rather than silently mark as applied.
+        # 0-field form page after submit click.
+        # Check if it's still the review page (button didn't fire) — let user retry.
+        # Or if it's an entirely new form step, mark failed so user can re-approve.
         if next_step.page_type == "form" and len(next_step.fields) == 0:
-            log.warning("[submit] still on review page after submit click — pausing for retry")
-            return {
-                "current_step": next_step,
-                "status": "awaiting_submit",
-                "submit_action_label": state.submit_action_label,
-            }
+            _final_submit_kws = ("submit", "apply now")
+            still_has_submit = any(
+                any(kw in a.lower() for kw in _final_submit_kws)
+                for a in next_step.visible_actions
+            )
+            if still_has_submit:
+                log.warning("[submit] still on review page after submit click — pausing for retry")
+                return {
+                    "current_step": next_step,
+                    "status": "awaiting_submit",
+                    "submit_action_label": state.submit_action_label,
+                }
+            # A different 0-field page appeared — probably a confirmation variant SEEK
+            # shows that our text patterns don't cover yet.  Treat as successful since
+            # the submit button is gone.
+            log.warning("[submit] 0-field page without submit button after click — assuming submitted: url=%s actions=%s",
+                        next_step.page_url, next_step.visible_actions)
+            return {"current_step": next_step, "status": "completed"}
 
-        log.warning("[submit] unexpected page after submit: page_type=%s url=%s",
-                    next_step.page_type, next_step.page_url)
-        return {"current_step": next_step, "status": "completed"}
+        log.warning("[submit] unexpected page after submit: page_type=%s fields=%d url=%s",
+                    next_step.page_type, len(next_step.fields), next_step.page_url)
+        # Unknown state — could be a new form step that appeared after clicking submit,
+        # or a SEEK SPA transition that hasn't rendered yet.  Mark as failed so the
+        # user can retry rather than silently marking as applied when nothing was sent.
+        return {
+            "current_step": next_step,
+            "status": "failed",
+            "error": (
+                f"Submit navigated to unexpected page ({next_step.page_type}) "
+                f"at {next_step.page_url} — submission may not have completed"
+            ),
+        }
 
     # ── fill ───────────────────────────────────────────────────────────────
     async def node_fill(state: ApplyState) -> dict[str, Any]:
@@ -417,7 +439,8 @@ def build_apply_graph(
                 "step_history": new_history,
             }
 
-        log.info("[fill] next page_type=%s fields=%d", next_step.page_type, len(next_step.fields))
+        log.info("[fill] next page_type=%s fields=%d actions=%s",
+                 next_step.page_type, len(next_step.fields), next_step.visible_actions)
 
         if next_step.page_type == "confirmation":
             log.info("[fill] application submitted — confirmation page")
@@ -427,27 +450,45 @@ def build_apply_graph(
                 "step_history": new_history,
             }
 
-        # 0-field form page = SEEK review/summary page. Pause for user to confirm submit.
-        if next_step.page_type == "form" and len(next_step.fields) == 0:
-            # Pick the real submit button — ignore noise like "Open app", "Back", "Cancel"
-            _submit_keywords = ("submit", "continue", "apply", "send", "confirm", "next")
-            _exclude_keywords = ("open app", "back", "cancel", "close", "sign", "log")
-            submit_label = next(
-                (a for a in next_step.visible_actions
-                 if any(kw in a.lower() for kw in _submit_keywords)
-                 and not any(ex in a.lower() for ex in _exclude_keywords)),
-                next(
-                    (a for a in next_step.visible_actions
-                     if not any(ex in a.lower() for ex in _exclude_keywords)),
-                    "Continue",
-                ),
-            )
-            log.info("[fill] review page detected — pausing for submit confirmation (action=%r) all_actions=%s",
-                     submit_label, next_step.visible_actions)
+        # Detect the final application-review page by its action buttons.
+        # SEEK's review page has a "Submit application" button (type=submit).
+        # This check must come BEFORE the field-count check because the review
+        # page may have a visible cover-letter textarea (fields=1) even though
+        # no user input is needed — the agent must NOT try to click "Continue".
+        _final_submit_kws = ("submit", "apply now")
+        _noise_kws = ("open app", "back", "cancel", "close", "sign", "log")
+
+        final_label = next(
+            (a for a in next_step.visible_actions
+             if any(kw in a.lower() for kw in _final_submit_kws)
+             and not any(ex in a.lower() for ex in _noise_kws)),
+            None,
+        )
+
+        if next_step.page_type == "form" and final_label:
+            # Final application-review page — pause so the user can confirm submit
+            log.info("[fill] final review page — submit_label=%r fields=%d all_actions=%s",
+                     final_label, len(next_step.fields), next_step.visible_actions)
             return {
                 "current_step": next_step,
                 "status": "awaiting_submit",
-                "submit_action_label": submit_label,
+                "submit_action_label": final_label,
+                "step_history": new_history,
+            }
+
+        # Interim 0-field page (e.g. SEEK profile review: "Add role", "Continue").
+        # Auto-click the Continue-equivalent button — no human pause needed.
+        if next_step.page_type == "form" and len(next_step.fields) == 0:
+            auto_label = next(
+                (a for a in next_step.visible_actions if "continue" in a.lower()),
+                "Continue",
+            )
+            log.info("[fill] interim 0-field page — auto-clicking %r all_actions=%s",
+                     auto_label, next_step.visible_actions)
+            return {
+                "current_step": next_step,
+                "proposed_values": {},
+                "action_label": auto_label,
                 "step_history": new_history,
             }
 

@@ -11,6 +11,21 @@ export function buildServer(secret: string) {
 
   app.addHook('onRequest', makeAuthHook(secret));
 
+  // Global error handler — catches unhandled Playwright errors (network failures,
+  // timeouts, etc.) and returns a proper tool envelope instead of HTTP 500.
+  // Without this, any unexpected Playwright throw crashes the route and the agent
+  // receives a raw 500 it cannot parse as an error envelope.
+  app.setErrorHandler((err, _request, reply) => {
+    app.log.error(err);
+    reply.status(200).send({
+      status: 'error',
+      error: {
+        type: 'internal_error',
+        message: err.message ?? String(err),
+      },
+    });
+  });
+
   app.get('/health', async () => {
     return ok({ service: 'tools', status: 'up' });
   });

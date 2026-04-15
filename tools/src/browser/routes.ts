@@ -272,10 +272,40 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     // Click the action button — strip zero-width chars from label before matching
     const cleanLabel = parsed.data.action_label.replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '').trim();
     const prevUrl = session.page.url();
-    const actionBtn = session.page
+
+    // Save a DOM snapshot before clicking so we can inspect button structure if needed.
+    // This is especially useful for 0-field pages (profile review, final submit).
+    await saveSnapshot(session.page, 'dom').catch(() => {});
+
+    // Primary: getByRole (respects aria-label, accessible name).
+    // Fallback 1: text-content locator (handles buttons where accessible name ≠ visible text).
+    // Fallback 2: evaluate() direct DOM click — bypasses Playwright role resolution entirely.
+    let actionBtn = session.page
       .getByRole('button', { name: cleanLabel, exact: false })
       .first();
-    await actionBtn.click({ timeout: 30_000 });
+    try {
+      await actionBtn.click({ timeout: 10_000 });
+    } catch {
+      // Fallback 1: match any button/link whose text content contains the label
+      actionBtn = session.page
+        .locator('button, [role="button"], a[role="button"], input[type="submit"]')
+        .filter({ hasText: cleanLabel })
+        .first();
+      const count = await actionBtn.count().catch(() => 0);
+      if (count > 0) {
+        await actionBtn.click({ timeout: 10_000 });
+      } else {
+        // Fallback 2: direct DOM querySelector by text — covers React portals, custom elements
+        await session.page.evaluate((label) => {
+          const all = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], a'));
+          const el = all.find((e) => (e.textContent ?? '').trim().toLowerCase().includes(label.toLowerCase()));
+          if (!el) throw new Error(`No element found with text: ${label}`);
+          el.click();
+        }, cleanLabel);
+        // Re-point actionBtn to something stable for the waitFor race below
+        actionBtn = session.page.locator('body').first();
+      }
+    }
 
     // SEEK is a SPA — waitForLoadState('domcontentloaded') never fires on step transitions.
     // Wait for the button we just clicked to detach/hide (the page has moved on),
@@ -389,14 +419,20 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     if (!session) return sessionError(parsed.data.session_key);
 
     if (parsed.data.provider === 'seek') {
-      const result = await seekStartApply(session.page, parsed.data.job_url);
-      if (result.status === 'needs_human') {
-        return { status: 'needs_human' as const, data: { reason: result.reason, login_url: result.login_url } };
+      try {
+        const result = await seekStartApply(session.page, parsed.data.job_url);
+        if (result.status === 'needs_human') {
+          return { status: 'needs_human' as const, data: { reason: result.reason, login_url: result.login_url } };
+        }
+        if (result.status === 'error') {
+          return error(result.type, result.message);
+        }
+        return ok({ apply_url: result.apply_url, is_external_portal: result.is_external_portal, portal_type: result.portal_type });
+      } catch (err) {
+        // Catch Playwright errors (network failure, timeout, etc.) so they return
+        // a proper error envelope instead of crashing Fastify with HTTP 500.
+        return error('navigation_failed', String(err));
       }
-      if (result.status === 'error') {
-        return error(result.type, result.message);
-      }
-      return ok({ apply_url: result.apply_url, is_external_portal: result.is_external_portal, portal_type: result.portal_type });
     }
 
     return error('unsupported_provider', `start_apply not implemented for provider: ${parsed.data.provider}`);

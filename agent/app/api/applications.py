@@ -110,6 +110,39 @@ async def discard_application(app_id: str, request: Request):
     return {"application_id": app_id, "state": "discarded"}
 
 
+@router.post("/applications/{app_id}/cancel", response_model=dict)
+async def cancel_application(app_id: str, request: Request):
+    """Cancel an in-progress application (preparing / applying / submitting).
+
+    Marks the application as discarded and kills any pending/processing queue
+    items so the worker won't pick them up. The job is moved back to 'discovered'
+    so the user can re-queue it later if they wish.
+    """
+    repo: SqliteApplicationRepository = request.app.state.application_repository
+    queue_repo = request.app.state.queue_repository
+    job_repo = request.app.state.job_repository
+
+    app = await repo.get(app_id)
+    if app is None:
+        raise HTTPException(status_code=404, detail="application not found")
+
+    cancellable_states = {"preparing", "applying", "submitting", "prepared", "approved", "needs_review", "awaiting_submit"}
+    if app.state not in cancellable_states:
+        raise HTTPException(status_code=409, detail=f"cannot cancel from state '{app.state}'")
+
+    # Kill any queued work for this application
+    cancelled = await queue_repo.cancel_for_entity(app_id)
+    log.info("[cancel] app_id=%s queue_items_cancelled=%d", app_id, cancelled)
+
+    # Move application to discarded
+    await repo.update_state(app_id, "discarded")
+
+    # Move job back to discovered so user can re-queue later
+    await job_repo.update_state(app.job_id, "discovered")
+
+    return {"application_id": app_id, "state": "discarded", "queue_items_cancelled": cancelled}
+
+
 @router.post("/applications/{app_id}/mark_submitted", response_model=dict)
 async def mark_submitted(app_id: str, request: Request):
     """Mark an application as submitted — used when the portal redirected to an external ATS."""

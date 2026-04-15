@@ -108,6 +108,10 @@ export async function markSubmitted(appId: string): Promise<void> {
   await apiFetch<unknown>(`/applications/${appId}/mark_submitted`, { method: "POST" });
 }
 
+export async function cancelApplication(appId: string): Promise<void> {
+  await apiFetch<unknown>(`/applications/${appId}/cancel`, { method: "POST" });
+}
+
 export async function submitApply(
   runId: string,
   submitActionLabel: string,
