@@ -12,6 +12,7 @@ from app.state.canonical_profile import (
     ProfileEnrichmentQuestion,
 )
 from app.state.raw_profile import RawProfile
+from app.services.voice_profile import build_voice_profile_sync
 
 _DOMAIN_RULES: dict[str, tuple[str, ...]] = {
     "education": ("education", "student", "school"),
@@ -61,6 +62,7 @@ def build_canonical_profile(raw_profile: dict[str, Any]) -> CanonicalProfile:
         salary_expectation=_optional_text(raw_profile.get("salary_expectation")),
         core_strengths=core_strengths,
         voice_samples=writing_samples,
+        voice_profile=build_voice_profile_sync(writing_samples),
         evidence_items=evidence_items,
     )
 
@@ -197,6 +199,7 @@ def build_canonical_profile_from_raw_profile(raw_profile: RawProfile) -> Canonic
         location=raw_profile.identity.location or None,
         core_strengths=raw_profile.skills,
         voice_samples=raw_profile.writing_samples,
+        voice_profile=build_voice_profile_sync(raw_profile.writing_samples),
         evidence_items=evidence_items,
     )
 
@@ -217,6 +220,7 @@ def apply_profile_answers(
             continue
         if target_field == "voice_samples":
             updated.voice_samples = _split_multiline_values(answer.value)
+            updated.voice_profile = build_voice_profile_sync(updated.voice_samples)
             continue
 
         match = re.fullmatch(r"evidence_items\[([^\]]+)\]\.(\w+)", target_field)
@@ -231,7 +235,43 @@ def apply_profile_answers(
         elif field_name == "metrics":
             item.metrics = _split_multiline_values(answer.value)
 
+    if updated.voice_samples and not updated.voice_profile.tone_labels:
+        updated.voice_profile = build_voice_profile_sync(updated.voice_samples)
+
     return updated
+
+
+def extract_voice_samples_from_answer(answer: str, *, limit: int = 2) -> list[str]:
+    if not answer.strip():
+        return []
+
+    normalized = answer.replace("\r\n", "\n").strip()
+    segments = re.split(r"\n+|(?<=[.!?])\s+", normalized)
+    samples: list[str] = []
+    seen: set[str] = set()
+
+    for segment in segments:
+        candidate = " ".join(segment.strip().strip("\"'").split())
+        if not candidate:
+            continue
+        if not _looks_like_voice_sample(candidate):
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        samples.append(candidate)
+        if len(samples) >= limit:
+            break
+
+    return samples
+
+
+def merge_voice_samples(existing: list[str], answer: str, *, max_samples: int = 12) -> list[str]:
+    merged = _unique_preserving_order([*existing, *extract_voice_samples_from_answer(answer)])
+    if len(merged) <= max_samples:
+        return merged
+    return merged[-max_samples:]
 
 
 def _build_experience_item(
@@ -378,6 +418,38 @@ def _current_value_for_target_field(profile: CanonicalProfile, target_field: str
 def _split_multiline_values(value: str) -> list[str]:
     values = [line.strip() for line in value.splitlines() if line.strip()]
     return _unique_preserving_order(values)
+
+
+def _looks_like_voice_sample(value: str) -> bool:
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", value)
+    if len(words) < 6 or len(words) > 35:
+        return False
+    if re.fullmatch(r"[\d\s,./:%()+-]+", value):
+        return False
+    lowercase_words = [word.lower() for word in words]
+    stopword_hits = sum(
+        1
+        for word in lowercase_words
+        if word
+        in {
+            "i",
+            "my",
+            "me",
+            "the",
+            "a",
+            "an",
+            "to",
+            "and",
+            "for",
+            "with",
+            "that",
+            "because",
+            "when",
+            "while",
+            "by",
+        }
+    )
+    return stopword_hits >= 2
 
 
 def _slug(value: str) -> str:

@@ -3,6 +3,8 @@ from app.services.profile_target import (
     build_canonical_profile,
     build_canonical_profile_from_raw_profile,
     build_profile_enrichment_questions,
+    extract_voice_samples_from_answer,
+    merge_voice_samples,
 )
 from app.state.canonical_profile import CanonicalEvidenceItem, CanonicalProfile, ProfileAnswer
 from app.state.raw_profile import (
@@ -15,17 +17,17 @@ from app.state.raw_profile import (
 
 def test_build_canonical_profile_maps_existing_profile_shape() -> None:
     raw_profile = {
-        "name": "Nitin Datta",
+        "name": "Alex Test",
         "headline": "AI & Data Systems Engineer",
         "summary": "Hands-on data engineer building practical systems.",
-        "location": "Adelaide",
+        "location": "Test City",
         "work_rights": "Permanent resident",
-        "salary_expectation": "$180,000 - $200,000",
+        "salary_expectation": "$150,000 - $180,000",
         "core_strengths": ["Databricks", "embeddings", "entity resolution", "FastAPI"],
         "writing_samples": ["I tend to work best when I own the problem end-to-end."],
         "narrative_strengths": [
             (
-                "At the Department for Education in South Australia I built a "
+                "At the Department for Education I built a "
                 "metadata-driven ingestion and transformation framework on Databricks."
             )
         ],
@@ -50,9 +52,10 @@ def test_build_canonical_profile_maps_existing_profile_shape() -> None:
 
     draft = build_canonical_profile(raw_profile)
 
-    assert draft.name == "Nitin Datta"
+    assert draft.name == "Alex Test"
     assert draft.headline == "AI & Data Systems Engineer"
     assert draft.voice_samples == ["I tend to work best when I own the problem end-to-end."]
+    assert draft.voice_profile.prefers_first_person is True
     assert len(draft.evidence_items) == 2
 
     experience_item = draft.evidence_items[0]
@@ -72,7 +75,7 @@ def test_build_canonical_profile_maps_existing_profile_shape() -> None:
 
 def test_build_profile_enrichment_questions_targets_star_gaps() -> None:
     profile = CanonicalProfile(
-        name="Nitin Datta",
+        name="Alex Test",
         voice_samples=["I tend to work best when I own the problem end-to-end."],
         evidence_items=[
             CanonicalEvidenceItem(
@@ -100,9 +103,9 @@ def test_build_profile_enrichment_questions_targets_star_gaps() -> None:
 def test_build_canonical_profile_from_raw_profile_uses_experience_and_projects() -> None:
     raw_profile = RawProfile(
         identity=RawProfileIdentity(
-            name="Nitin Datta",
+            name="Alex Test",
             headline="AI & Data Systems Engineer",
-            location="Adelaide",
+            location="Test City",
         ),
         summary="Hands-on data engineer.",
         skills=["Databricks", "FastAPI"],
@@ -123,16 +126,17 @@ def test_build_canonical_profile_from_raw_profile_uses_experience_and_projects()
 
     canonical = build_canonical_profile_from_raw_profile(raw_profile)
 
-    assert canonical.name == "Nitin Datta"
+    assert canonical.name == "Alex Test"
     assert canonical.core_strengths == ["Databricks", "FastAPI"]
     assert len(canonical.evidence_items) == 1
     assert canonical.evidence_items[0].source == "Department for Education"
     assert canonical.evidence_items[0].metrics == ["Reduced source onboarding time."]
+    assert canonical.voice_profile.tone_labels == []
 
 
 def test_apply_profile_answers_updates_top_level_and_evidence_fields() -> None:
     profile = CanonicalProfile(
-        name="Nitin Datta",
+        name="Alex Test",
         voice_samples=["I like to stay close to the delivery details."],
         evidence_items=[
             CanonicalEvidenceItem(
@@ -171,8 +175,34 @@ def test_apply_profile_answers_updates_top_level_and_evidence_fields() -> None:
         "I prefer to own the problem end-to-end.",
         "I try to keep solutions practical.",
     ]
+    assert updated.voice_profile.prefers_first_person is True
     assert updated.evidence_items[0].situation == "The department needed a scalable way to master student records."
     assert updated.evidence_items[0].metrics == [
         "Reduced onboarding time",
         "Improved matching reliability",
+    ]
+
+
+def test_extract_voice_samples_from_answer_prefers_sentence_like_text() -> None:
+    samples = extract_voice_samples_from_answer(
+        "I usually start by getting close to the operational pain point, then I keep the design practical enough to ship.\n"
+        "12 source systems\n"
+        "Reduced onboarding time"
+    )
+
+    assert samples == [
+        "I usually start by getting close to the operational pain point, then I keep the design practical enough to ship."
+    ]
+
+
+def test_merge_voice_samples_appends_unique_interview_style_lines() -> None:
+    merged = merge_voice_samples(
+        ["I like to stay close to the delivery details."],
+        "I like to stay close to the delivery details.\n"
+        "I usually keep the solution practical rather than over-designing it.",
+    )
+
+    assert merged == [
+        "I like to stay close to the delivery details.",
+        "I usually keep the solution practical rather than over-designing it.",
     ]

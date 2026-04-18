@@ -76,12 +76,14 @@ _configure_logging()
 from app.api.applications import router as applications_router
 from app.api.health import router as health_router
 from app.api.jobs import router as jobs_router
+from app.api.profile_interview import router as profile_interview_router
 from app.api.setup import router as setup_router
 from app.api.workflows import router as workflows_router
 from app.persistence.sqlite.applications import SqliteApplicationRepository, SqliteDraftRepository
 from app.persistence.sqlite.connection import Database
 from app.persistence.sqlite.job_analysis import SqliteJobAnalysisRepository
 from app.persistence.sqlite.jobs import SqliteJobRepository
+from app.persistence.sqlite.profile_interview import SqliteProfileInterviewRepository
 from app.persistence.sqlite.question_cache import SqliteQuestionCacheRepository
 from app.persistence.sqlite.queue import SqliteQueueRepository
 from app.persistence.sqlite.workflow_runs import (
@@ -106,6 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.browser_session_repository = SqliteBrowserSessionRepository(database.connection)
     app.state.queue_repository = SqliteQueueRepository(database.connection)
     app.state.question_cache_repository = SqliteQuestionCacheRepository(database.connection)
+    app.state.profile_interview_repository = SqliteProfileInterviewRepository(database.connection)
     app.state.tool_client = ToolClient(settings)
 
     await app.state.queue_repository.reset_stale()
@@ -138,6 +141,7 @@ def create_app() -> FastAPI:
     app.include_router(applications_router, prefix="/api")
     app.include_router(workflows_router, prefix="/api")
     app.include_router(setup_router)
+    app.include_router(profile_interview_router)
     return app
 
 

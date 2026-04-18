@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     # Persistence
     repo_root: Path = Field(default=Path(__file__).resolve().parents[2])
     sqlite_path: Path = Field(default=Path("../automation/agent.db"))
-    profile_path: Path = Field(default=Path("profile/nitin_datta_profile.json"))
+    profile_path: Path = Field(default=Path("profile/profile.json"))
     raw_profile_path: Path = Field(default=Path("profile/raw_profile.json"))
     profile_answers_path: Path = Field(default=Path("profile/profile_answers.json"))
     profile_upload_dir: Path = Field(default=Path("automation/profile_uploads"))

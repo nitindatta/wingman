@@ -10,6 +10,18 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class VoiceProfile(BaseModel):
+    tone_labels: list[str] = Field(default_factory=list)
+    formality: str = ""
+    sentence_style: str = ""
+    uses_contractions: bool | None = None
+    prefers_first_person: bool | None = None
+    opening_style: str = ""
+    strengths: list[str] = Field(default_factory=list)
+    avoid: list[str] = Field(default_factory=list)
+    confidence: str = "draft"
+
+
 class CanonicalEvidenceItem(BaseModel):
     id: str
     source: str
@@ -35,6 +47,7 @@ class CanonicalProfile(BaseModel):
     salary_expectation: str | None = None
     core_strengths: list[str] = Field(default_factory=list)
     voice_samples: list[str] = Field(default_factory=list)
+    voice_profile: VoiceProfile = Field(default_factory=VoiceProfile)
     evidence_items: list[CanonicalEvidenceItem] = Field(default_factory=list)
 
 

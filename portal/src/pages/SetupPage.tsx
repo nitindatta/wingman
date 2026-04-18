@@ -3,12 +3,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { apiFetch } from "@/api/client";
 import {
+  profileInterviewSessionResponseSchema,
   profileTargetResponseSchema,
   profileUploadResponseSchema,
   rawProfileResponseSchema,
   setupStatusSchema,
   type CanonicalProfile,
-  type ProfileAnswer,
+  type ProfileInterviewSessionResponse,
   type ProfileTargetResponse,
   type ProfileUploadResponse,
   type RawProfile,
@@ -45,12 +46,66 @@ async function saveProfileTarget(targetProfile: CanonicalProfile) {
   return z.object({ ok: z.boolean(), target_profile_path: z.string() }).parse(raw);
 }
 
-async function saveProfileAnswers(answers: ProfileAnswer[]): Promise<ProfileTargetResponse> {
-  const raw = await apiFetch<unknown>("/setup/profile/target/answers", {
+async function fetchActiveProfileInterview(): Promise<ProfileInterviewSessionResponse | null> {
+  const raw = await apiFetch<unknown>("/profile-interview/active");
+  if (raw === null) {
+    return null;
+  }
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function startProfileInterview(itemId?: string): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>("/profile-interview/start", {
     method: "POST",
-    body: JSON.stringify({ answers }),
+    body: JSON.stringify(itemId ? { item_id: itemId } : {}),
   });
-  return profileTargetResponseSchema.parse(raw);
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function selectProfileInterviewItem(
+  sessionId: string,
+  itemId: string,
+): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>(`/profile-interview/${sessionId}/select`, {
+    method: "POST",
+    body: JSON.stringify({ item_id: itemId }),
+  });
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function answerProfileInterview(
+  sessionId: string,
+  answer: string,
+): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>(`/profile-interview/${sessionId}/answer`, {
+    method: "POST",
+    body: JSON.stringify({ answer }),
+  });
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function approveProfileInterview(sessionId: string): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>(`/profile-interview/${sessionId}/approve`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function deferProfileInterview(sessionId: string): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>(`/profile-interview/${sessionId}/defer`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return profileInterviewSessionResponseSchema.parse(raw);
+}
+
+async function completeProfileInterview(sessionId: string): Promise<ProfileInterviewSessionResponse> {
+  const raw = await apiFetch<unknown>(`/profile-interview/${sessionId}/complete`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+  return profileInterviewSessionResponseSchema.parse(raw);
 }
 
 async function uploadProfileFile(file: File): Promise<ProfileUploadResponse> {
@@ -74,6 +129,97 @@ function SectionHeader({ title }: { title: string }) {
       {title}
     </p>
   );
+}
+
+type EvidenceItem = CanonicalProfile["evidence_items"][number];
+
+function getEvidenceItemGaps(item: EvidenceItem): string[] {
+  const gaps: string[] = [];
+  if (!item.situation.trim()) {
+    gaps.push("situation");
+  }
+  if (!item.task.trim()) {
+    gaps.push("task");
+  }
+  if (!item.outcome.trim()) {
+    gaps.push("outcome");
+  }
+  if (item.metrics.length === 0) {
+    gaps.push("metrics");
+  }
+  return gaps;
+}
+
+function buildProfileImprovementActions(
+  profile: CanonicalProfile,
+  selectedItemId: string,
+): string[] {
+  const actions: string[] = [];
+  const selectedItem = profile.evidence_items.find((item) => item.id === selectedItemId);
+  const selectedGaps = selectedItem ? getEvidenceItemGaps(selectedItem) : [];
+
+  if (selectedItem && selectedGaps.length > 0) {
+    actions.push(
+      `Finish ${selectedItem.source}${selectedItem.role_title ? ` · ${selectedItem.role_title}` : ""} by filling ${selectedGaps.join(", ")}.`,
+    );
+  }
+
+  if (profile.voice_samples.length < 8) {
+    actions.push("Add a few more natural answers through the interview so Envoy captures your writing voice more reliably.");
+  }
+
+  const unapprovedWithGaps = profile.evidence_items.filter(
+    (item) => item.confidence !== "approved" && getEvidenceItemGaps(item).length > 0,
+  );
+  if (unapprovedWithGaps.length > 0) {
+    const nextItem = unapprovedWithGaps[0];
+    const nextGaps = getEvidenceItemGaps(nextItem);
+    actions.push(
+      `Run the interview on ${nextItem.source}${nextItem.role_title ? ` · ${nextItem.role_title}` : ""} next to tighten ${nextGaps.join(", ")}.`,
+    );
+  }
+
+  const approvedCount = profile.evidence_items.filter((item) => item.confidence === "approved").length;
+  if (approvedCount < 3) {
+    actions.push("Approve a few of your strongest evidence items so cover-letter generation has trusted material to write from.");
+  }
+
+  return actions.slice(0, 4);
+}
+
+function formatPercentScore(score: number | null | undefined): string {
+  if (score === null || score === undefined) {
+    return "Not scored yet";
+  }
+  return `${Math.round(score * 100)}%`;
+}
+
+function mergeInterviewDraftIntoProfile(
+  profile: CanonicalProfile,
+  session: ProfileInterviewSessionResponse | null,
+): CanonicalProfile {
+  if (!session?.draft_item) {
+    return profile;
+  }
+  const draft = session.draft_item;
+  return {
+    ...profile,
+    evidence_items: profile.evidence_items.map((item) => {
+      if (item.id !== draft.id) {
+        return item;
+      }
+      return {
+        ...item,
+        situation: draft.situation || item.situation,
+        task: draft.task || item.task,
+        action: draft.action || item.action,
+        outcome: draft.outcome || item.outcome,
+        metrics: draft.metrics.length > 0 ? draft.metrics : item.metrics,
+        tone_sample: draft.tone_sample ?? item.tone_sample,
+        confidence: draft.confidence || item.confidence,
+      };
+    }),
+  };
 }
 
 function RawProfilePreview({ rawProfile }: { rawProfile: RawProfile }) {
@@ -171,7 +317,9 @@ function RawProfilePreview({ rawProfile }: { rawProfile: RawProfile }) {
 export default function SetupPage() {
   const queryClient = useQueryClient();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [questionDrafts, setQuestionDrafts] = useState<Record<string, string>>({});
+  const [interviewAnswer, setInterviewAnswer] = useState("");
+  const [editableTargetProfile, setEditableTargetProfile] = useState<CanonicalProfile | null>(null);
+  const [selectedEvidenceItemId, setSelectedEvidenceItemId] = useState("");
 
   const statusQuery = useQuery({
     queryKey: ["setup-status"],
@@ -208,6 +356,12 @@ export default function SetupPage() {
     refetchInterval: 5000,
   });
 
+  const profileInterviewQuery = useQuery({
+    queryKey: ["profile-interview-active"],
+    queryFn: fetchActiveProfileInterview,
+    refetchInterval: 5000,
+  });
+
   const saveTargetMutation = useMutation({
     mutationFn: saveProfileTarget,
     onSuccess: () => {
@@ -216,52 +370,285 @@ export default function SetupPage() {
     },
   });
 
-  const saveAnswersMutation = useMutation({
-    mutationFn: saveProfileAnswers,
+  const startInterviewMutation = useMutation({
+    mutationFn: startProfileInterview,
     onSuccess: async (data) => {
-      setQuestionDrafts(
-        Object.fromEntries(
-          (data.questions ?? []).map((question) => [question.id, question.current_value ?? ""]),
-        ),
-      );
-      queryClient.setQueryData(["setup-profile-target"], data);
-      await queryClient.invalidateQueries({ queryKey: ["setup-status"] });
+      setInterviewAnswer("");
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] });
+    },
+  });
+
+  const selectInterviewMutation = useMutation({
+    mutationFn: ({ sessionId, itemId }: { sessionId: string; itemId: string }) =>
+      selectProfileInterviewItem(sessionId, itemId),
+    onSuccess: async (data) => {
+      setInterviewAnswer("");
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] });
+    },
+  });
+
+  const answerInterviewMutation = useMutation({
+    mutationFn: ({ sessionId, answer }: { sessionId: string; answer: string }) =>
+      answerProfileInterview(sessionId, answer),
+    onSuccess: async (data) => {
+      setInterviewAnswer("");
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] });
+    },
+  });
+
+  const approveInterviewMutation = useMutation({
+    mutationFn: approveProfileInterview,
+    onSuccess: async (data) => {
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] }),
+        queryClient.invalidateQueries({ queryKey: ["setup-status"] }),
+      ]);
+    },
+  });
+
+  const deferInterviewMutation = useMutation({
+    mutationFn: deferProfileInterview,
+    onSuccess: async (data) => {
+      setInterviewAnswer("");
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] }),
+        queryClient.invalidateQueries({ queryKey: ["setup-status"] }),
+      ]);
+    },
+  });
+
+  const completeInterviewMutation = useMutation({
+    mutationFn: completeProfileInterview,
+    onSuccess: async (data) => {
+      setInterviewAnswer("");
+      queryClient.setQueryData(["profile-interview-active"], data);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["setup-profile-target"] }),
+        queryClient.invalidateQueries({ queryKey: ["setup-status"] }),
+      ]);
     },
   });
 
   const status = statusQuery.data;
   const rawProfile = rawProfileQuery.data;
   const target = targetQuery.data;
+  const activeInterview = profileInterviewQuery.data;
   const hasProfileSource = Boolean(status?.raw_profile_exists || status?.profile_json_exists);
   const allDone = hasProfileSource && status?.target_profile_exists && status?.chrome_has_cookies;
 
   useEffect(() => {
-    if (!target?.questions?.length) {
+    if (!activeInterview || activeInterview.status !== "waiting_for_user") {
       return;
     }
-    setQuestionDrafts((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const question of target.questions) {
-        if (next[question.id] === undefined) {
-          next[question.id] = question.current_value ?? "";
-          changed = true;
-        }
+    setInterviewAnswer(activeInterview.current_prompt.suggested_answer ?? "");
+  }, [
+    activeInterview?.session_id,
+    activeInterview?.status,
+    activeInterview?.current_prompt.question_id,
+    activeInterview?.current_prompt.suggested_answer,
+  ]);
+
+  useEffect(() => {
+    if (!target?.target_profile) {
+      setEditableTargetProfile(null);
+      setSelectedEvidenceItemId("");
+      return;
+    }
+    const nextProfile = mergeInterviewDraftIntoProfile(
+      target.target_profile as CanonicalProfile,
+      activeInterview ?? null,
+    );
+    setEditableTargetProfile(nextProfile);
+    setSelectedEvidenceItemId((current) => {
+      if (current && nextProfile.evidence_items.some((item) => item.id === current)) {
+        return current;
       }
-      return changed ? next : current;
+      return nextProfile.evidence_items[0]?.id ?? "";
     });
-  }, [target?.questions]);
+  }, [target?.target_profile, activeInterview?.draft_item, activeInterview?.session_id]);
 
-  const questionAnswersToSave: ProfileAnswer[] = (target?.questions ?? []).map((question) => ({
-    question_id: question.id,
-    target_field: question.target_field,
-    value: questionDrafts[question.id] ?? question.current_value ?? "",
-  }));
+  useEffect(() => {
+    if (!activeInterview?.draft_item) {
+      return;
+    }
+    setEditableTargetProfile((current) => {
+      if (!current) {
+        return current;
+      }
+      return mergeInterviewDraftIntoProfile(current, activeInterview ?? null);
+    });
+  }, [activeInterview?.draft_item, activeInterview?.session_id]);
 
-  const hasQuestionChanges = (target?.questions ?? []).some((question) => {
-    const draftValue = questionDrafts[question.id] ?? question.current_value ?? "";
-    return draftValue !== (question.current_value ?? "");
-  });
+  useEffect(() => {
+    if (!activeInterview?.current_item_id || activeInterview.status === "completed") {
+      return;
+    }
+    setSelectedEvidenceItemId(activeInterview.current_item_id);
+  }, [activeInterview?.current_item_id, activeInterview?.status]);
+
+  const updateEvidenceField = (
+    itemId: string,
+    field: "situation" | "task" | "action" | "outcome" | "metrics",
+    value: string,
+  ) => {
+    setEditableTargetProfile((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        evidence_items: current.evidence_items.map((item) => {
+          if (item.id !== itemId) {
+            return item;
+          }
+          if (field === "metrics") {
+            return {
+              ...item,
+              metrics: value
+                .split("\n")
+                .map((entry) => entry.trim())
+                .filter(Boolean),
+            };
+          }
+          return {
+            ...item,
+            [field]: value,
+          };
+        }),
+      };
+    });
+  };
+
+  const targetProfileChanged =
+    editableTargetProfile !== null &&
+    target?.target_profile !== undefined &&
+    JSON.stringify(editableTargetProfile) !== JSON.stringify(target.target_profile);
+  const profileForView = editableTargetProfile || target?.target_profile;
+  const editableEvidenceItems = profileForView?.evidence_items ?? [];
+  const selectedEvidenceItem =
+    editableEvidenceItems.find((item) => item.id === selectedEvidenceItemId) ?? editableEvidenceItems[0];
+  const canRestartInterview = !activeInterview || activeInterview.status === "completed";
+  const approvedItemsCount = editableEvidenceItems.filter((item) => item.confidence === "approved").length;
+  const fullyFilledItemsCount = editableEvidenceItems.filter((item) => getEvidenceItemGaps(item).length === 0).length;
+  const itemsWithOpenGaps = editableEvidenceItems.filter((item) => getEvidenceItemGaps(item).length > 0);
+  const profileCompletionPercent =
+    editableEvidenceItems.length === 0 ? 0 : Math.round((fullyFilledItemsCount / editableEvidenceItems.length) * 100);
+  const suggestedActions = profileForView
+    ? buildProfileImprovementActions(profileForView, selectedEvidenceItemId)
+    : [];
+  const selectedItemGaps = selectedEvidenceItem ? getEvidenceItemGaps(selectedEvidenceItem) : [];
+  const selectedItemQualityScore =
+    selectedEvidenceItem ? activeInterview?.item_quality_scores?.[selectedEvidenceItem.id] : undefined;
+
+  const persistEditsIfNeeded = async () => {
+    if (!editableTargetProfile || !targetProfileChanged) {
+      return;
+    }
+    await saveTargetMutation.mutateAsync(editableTargetProfile);
+  };
+
+  const handleSelectEvidenceItem = async (itemId: string) => {
+    setSelectedEvidenceItemId(itemId);
+    await persistEditsIfNeeded();
+    if (!activeInterview || activeInterview.status === "completed") {
+      return;
+    }
+    if (activeInterview.current_item_id === itemId) {
+      return;
+    }
+    await selectInterviewMutation.mutateAsync({
+      sessionId: activeInterview.session_id,
+      itemId,
+    });
+  };
+
+  const handleStartInterview = async () => {
+    await persistEditsIfNeeded();
+    await startInterviewMutation.mutateAsync(undefined);
+  };
+
+  const handleRunInterviewOnSelectedItem = async () => {
+    if (!selectedEvidenceItem) {
+      return;
+    }
+    await persistEditsIfNeeded();
+    if (!activeInterview || activeInterview.status === "completed") {
+      await startInterviewMutation.mutateAsync(selectedEvidenceItem.id);
+      return;
+    }
+    await selectInterviewMutation.mutateAsync({
+      sessionId: activeInterview.session_id,
+      itemId: selectedEvidenceItem.id,
+    });
+  };
+
+  const ensureSelectedItemIsActive = async (): Promise<ProfileInterviewSessionResponse | null> => {
+    if (!selectedEvidenceItem) {
+      return activeInterview ?? null;
+    }
+    if (!activeInterview || activeInterview.status === "completed") {
+      return await startInterviewMutation.mutateAsync(selectedEvidenceItem.id);
+    }
+    if (activeInterview.current_item_id === selectedEvidenceItem.id) {
+      return activeInterview;
+    }
+    return await selectInterviewMutation.mutateAsync({
+      sessionId: activeInterview.session_id,
+      itemId: selectedEvidenceItem.id,
+    });
+  };
+
+  const handleAnswerInterview = async () => {
+    if (!activeInterview || !interviewAnswer.trim()) {
+      return;
+    }
+    await persistEditsIfNeeded();
+    await answerInterviewMutation.mutateAsync({
+      sessionId: activeInterview.session_id,
+      answer: interviewAnswer,
+    });
+  };
+
+  const handleApproveInterview = async () => {
+    if (!activeInterview) {
+      return;
+    }
+    await persistEditsIfNeeded();
+    await approveInterviewMutation.mutateAsync(activeInterview.session_id);
+  };
+
+  const handleDeferInterview = async () => {
+    if (!activeInterview) {
+      return;
+    }
+    await persistEditsIfNeeded();
+    let session = await ensureSelectedItemIsActive();
+    if (!session) {
+      return;
+    }
+    if (session.status === "waiting_for_user" && interviewAnswer.trim()) {
+      session = await answerInterviewMutation.mutateAsync({
+        sessionId: session.session_id,
+        answer: interviewAnswer,
+      });
+    }
+    if (session.status === "reviewing") {
+      await deferInterviewMutation.mutateAsync(session.session_id);
+    }
+  };
+
+  const handleCompleteInterview = async () => {
+    if (!activeInterview) {
+      return;
+    }
+    await persistEditsIfNeeded();
+    await completeInterviewMutation.mutateAsync(activeInterview.session_id);
+  };
 
   return (
     <section className="space-y-6 max-w-5xl">
@@ -401,117 +788,452 @@ export default function SetupPage() {
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <p className="text-sm font-medium text-slate-800">
-                          {target.target_profile.name || "Unnamed profile"}
+                          {editableTargetProfile?.name || target.target_profile.name || "Unnamed profile"}
                         </p>
-                        {target.target_profile.headline && (
+                        {(editableTargetProfile?.headline || target.target_profile.headline) && (
                           <p className="text-xs text-slate-500 mt-0.5">
-                            {target.target_profile.headline}
+                            {editableTargetProfile?.headline || target.target_profile.headline}
                           </p>
                         )}
                       </div>
-                      {!status.target_profile_exists && (
+                      {editableTargetProfile && (
                         <button
-                          onClick={() => saveTargetMutation.mutate(target.target_profile as CanonicalProfile)}
-                          disabled={saveTargetMutation.isPending}
+                          onClick={() => saveTargetMutation.mutate(editableTargetProfile)}
+                          disabled={saveTargetMutation.isPending || !targetProfileChanged}
                           className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                         >
-                          {saveTargetMutation.isPending ? "Saving…" : "Save draft"}
+                          {saveTargetMutation.isPending
+                            ? "Saving…"
+                            : status.target_profile_exists
+                              ? "Save changes"
+                              : "Save draft"}
                         </button>
                       )}
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
                       <div className="rounded border bg-white px-2 py-1.5">
-                        Evidence items: {target.target_profile.evidence_items.length}
+                        Evidence items: {(editableTargetProfile || target.target_profile).evidence_items.length}
                       </div>
                       <div className="rounded border bg-white px-2 py-1.5">
-                        Voice samples: {target.target_profile.voice_samples.length}
+                        Voice samples: {(editableTargetProfile || target.target_profile).voice_samples.length}
                       </div>
                     </div>
                   </div>
 
-                  {target.target_profile.evidence_items.length > 0 && (
-                    <div className="space-y-2">
-                      <SectionHeader title="Evidence Preview" />
-                      {target.target_profile.evidence_items.slice(0, 4).map((item) => (
-                        <div key={item.id} className="rounded border bg-white p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-medium text-slate-800">
+                  <div className="rounded border border-indigo-200 bg-indigo-50 p-3 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <SectionHeader title="Overall Status" />
+                        <p className="mt-1 text-sm text-indigo-950">
+                          Canonical profile completeness is {profileCompletionPercent}%.
+                        </p>
+                      </div>
+                      <div className="rounded border border-indigo-200 bg-white px-3 py-2 text-xs text-indigo-900">
+                        {itemsWithOpenGaps.length === 0
+                          ? "All STAR cards are filled"
+                          : `${itemsWithOpenGaps.length} items still need work`}
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 md:grid-cols-4 text-xs text-slate-700">
+                      <div className="rounded border bg-white px-3 py-2">
+                        Evidence items: <span className="font-medium">{editableEvidenceItems.length}</span>
+                      </div>
+                      <div className="rounded border bg-white px-3 py-2">
+                        Fully filled STAR cards: <span className="font-medium">{fullyFilledItemsCount}</span>
+                      </div>
+                      <div className="rounded border bg-white px-3 py-2">
+                        Approved items: <span className="font-medium">{approvedItemsCount}</span>
+                      </div>
+                      <div className="rounded border bg-white px-3 py-2">
+                        Combined profile score: <span className="font-medium">{formatPercentScore(activeInterview?.overall_profile_score)}</span>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2 md:grid-cols-3 text-xs text-slate-700">
+                      <div className="rounded border bg-white px-3 py-2">
+                        Field completeness: <span className="font-medium">{profileCompletionPercent}%</span>
+                      </div>
+                      <div className="rounded border bg-white px-3 py-2">
+                        Answer quality: <span className="font-medium">{formatPercentScore(activeInterview?.overall_answer_quality_score)}</span>
+                      </div>
+                      <div className="rounded border bg-white px-3 py-2">
+                        Voice profile: <span className="font-medium">{profileForView?.voice_profile.confidence || "draft"}</span>
+                      </div>
+                    </div>
+
+                    {selectedEvidenceItem && (
+                      <div className="rounded border bg-white p-3 text-sm text-slate-700">
+                        <span className="font-medium text-slate-900">Selected item status:</span>{" "}
+                        {selectedItemGaps.length === 0
+                          ? `${selectedEvidenceItem.source}${selectedEvidenceItem.role_title ? ` · ${selectedEvidenceItem.role_title}` : ""} is filled and ready for approval or another interview pass.`
+                          : `${selectedEvidenceItem.source}${selectedEvidenceItem.role_title ? ` · ${selectedEvidenceItem.role_title}` : ""} still needs ${selectedItemGaps.join(", ")}.`}
+                        {" "}
+                        {selectedItemQualityScore !== undefined && (
+                          <span className="text-slate-500">
+                            Current answer quality for this item: {formatPercentScore(selectedItemQualityScore)}.
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="rounded border bg-white p-3">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                        Best Next Actions
+                      </p>
+                      {suggestedActions.length > 0 ? (
+                        <ul className="mt-2 list-disc space-y-1 pl-4 text-sm text-slate-700">
+                          {suggestedActions.map((action) => (
+                            <li key={action}>{action}</li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-2 text-sm text-slate-700">
+                          The canonical profile is in a strong place. Focus on reviewing approved items and preparing the cover-letter flow to consume them.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+
+                  {target.questions.length > 0 && !activeInterview && (
+                    <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                      Envoy has deterministic backup questions available for this profile, but the guided interview is now the primary way to refine STAR evidence.
+                    </div>
+                  )}
+
+                  <div className="space-y-3 rounded border border-sky-200 bg-sky-50 p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <SectionHeader title="Profile Interview" />
+                        <p className="mt-1 text-sm text-sky-900">
+                          Select an experience or project, review the current STAR draft, and keep refining it through the interview or direct edits.
+                        </p>
+                      </div>
+                      {canRestartInterview && (
+                        <button
+                          onClick={() => void handleStartInterview()}
+                          disabled={startInterviewMutation.isPending}
+                          className="rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+                        >
+                          {startInterviewMutation.isPending
+                            ? "Starting…"
+                            : (editableTargetProfile || target.target_profile).evidence_items.some(
+                                  (item) => item.confidence === "approved",
+                                )
+                              ? "Run interview again"
+                              : "Start interview"}
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="space-y-3">
+                      <label className="block">
+                        <span className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">
+                          Select Experience Or Project
+                        </span>
+                        <select
+                          value={selectedEvidenceItem?.id ?? ""}
+                          onChange={(event) => void handleSelectEvidenceItem(event.target.value)}
+                          className="mt-1 w-full rounded border border-sky-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        >
+                          {editableEvidenceItems.map((item) => (
+                            <option key={item.id} value={item.id}>
                               {item.source}
                               {item.role_title ? ` · ${item.role_title}` : ""}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+
+                      {selectedEvidenceItem && (
+                        <div className="rounded border border-sky-200 bg-white p-3 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-medium text-slate-800">
+                              {selectedEvidenceItem.source}
+                              {selectedEvidenceItem.role_title ? ` · ${selectedEvidenceItem.role_title}` : ""}
                             </p>
-                            <span className="text-[11px] uppercase tracking-wide text-slate-400">
-                              {item.confidence}
-                            </span>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] uppercase tracking-wide text-sky-700">
+                                {selectedEvidenceItem.confidence}
+                              </span>
+                              <button
+                                onClick={() => void handleRunInterviewOnSelectedItem()}
+                                disabled={
+                                  startInterviewMutation.isPending ||
+                                  selectInterviewMutation.isPending
+                                }
+                                className="rounded border border-sky-300 bg-white px-2.5 py-1 text-[11px] font-medium text-sky-700 hover:bg-sky-50 disabled:opacity-50"
+                              >
+                                {startInterviewMutation.isPending || selectInterviewMutation.isPending
+                                  ? "Starting…"
+                                  : activeInterview?.status !== "completed" &&
+                                      activeInterview?.current_item_id === selectedEvidenceItem.id
+                                    ? "Interview this item again"
+                                    : "Run interview on this item"}
+                              </button>
+                            </div>
                           </div>
-                          {item.action && (
-                            <p className="mt-1 text-xs text-slate-600">{item.action}</p>
-                          )}
-                          <div className="mt-2 flex flex-wrap gap-1.5">
-                            {item.skills.slice(0, 4).map((skill) => (
+                          <p className="text-xs text-slate-500">
+                            This uses the current STAR answers on this card as the starting point and asks only the next best follow-up.
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {selectedEvidenceItem.skills.slice(0, 6).map((skill) => (
                               <span key={skill} className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600">
                                 {skill}
                               </span>
                             ))}
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {target.questions.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="flex items-center justify-between gap-3">
-                        <SectionHeader title="Enrichment Questions" />
-                        <button
-                          onClick={() => saveAnswersMutation.mutate(questionAnswersToSave)}
-                          disabled={!hasQuestionChanges || saveAnswersMutation.isPending}
-                          className="rounded bg-amber-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-                        >
-                          {saveAnswersMutation.isPending ? "Saving answers…" : "Save answers"}
-                        </button>
-                      </div>
-                      {target.questions.slice(0, 6).map((question) => (
-                        <div key={question.id} className="rounded border bg-amber-50 border-amber-200 p-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="text-sm font-medium text-amber-900">{question.prompt}</p>
-                            <span className="text-[11px] uppercase tracking-wide text-amber-700">
-                              {question.priority}
-                            </span>
+                          <div className="grid gap-3 md:grid-cols-2">
+                            <label className="block">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                Situation
+                              </span>
+                              <textarea
+                                value={selectedEvidenceItem.situation}
+                                onChange={(event) =>
+                                  updateEvidenceField(selectedEvidenceItem.id, "situation", event.target.value)
+                                }
+                                rows={4}
+                                className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                Task
+                              </span>
+                              <textarea
+                                value={selectedEvidenceItem.task}
+                                onChange={(event) =>
+                                  updateEvidenceField(selectedEvidenceItem.id, "task", event.target.value)
+                                }
+                                rows={4}
+                                className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                Action
+                              </span>
+                              <textarea
+                                value={selectedEvidenceItem.action}
+                                onChange={(event) =>
+                                  updateEvidenceField(selectedEvidenceItem.id, "action", event.target.value)
+                                }
+                                rows={4}
+                                className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              />
+                            </label>
+                            <label className="block">
+                              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                Outcome
+                              </span>
+                              <textarea
+                                value={selectedEvidenceItem.outcome}
+                                onChange={(event) =>
+                                  updateEvidenceField(selectedEvidenceItem.id, "outcome", event.target.value)
+                                }
+                                rows={4}
+                                className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              />
+                            </label>
                           </div>
-                          {question.help_text && (
-                            <p className="mt-1 text-xs text-amber-800">{question.help_text}</p>
-                          )}
-                          <textarea
-                            value={questionDrafts[question.id] ?? question.current_value ?? ""}
-                            onChange={(event) =>
-                              setQuestionDrafts((current) => ({
-                                ...current,
-                                [question.id]: event.target.value,
-                              }))
-                            }
-                            rows={question.input_type === "textarea" ? 4 : 2}
-                            className="mt-3 w-full rounded border border-amber-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-amber-400 focus:outline-none focus:ring-2 focus:ring-amber-200"
-                            placeholder="Type your answer here"
-                          />
-                          {question.current_value && (
-                            <p className="mt-2 text-[11px] text-amber-700">
-                              Current value is prefilled. Edit it if you want to sharpen or replace it.
-                            </p>
-                          )}
+                          <label className="block">
+                            <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                              Metrics
+                            </span>
+                            <textarea
+                              value={selectedEvidenceItem.metrics.join("\n")}
+                              onChange={(event) =>
+                                updateEvidenceField(selectedEvidenceItem.id, "metrics", event.target.value)
+                              }
+                              rows={3}
+                              className="mt-1 w-full rounded border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              placeholder="One metric or proof point per line"
+                            />
+                          </label>
                         </div>
-                      ))}
-                      {saveAnswersMutation.isSuccess && (
-                        <p className="text-sm text-green-700">
-                          Answers saved. The canonical draft and remaining questions have been refreshed.
-                        </p>
                       )}
-                      {saveAnswersMutation.isError && (
-                        <p className="text-sm text-red-600">
-                          {(saveAnswersMutation.error as Error).message}
-                        </p>
-                      )}
+
+                    {activeInterview && (
+                      <div className="space-y-3">
+                        <div className="grid gap-2 text-xs text-sky-800 sm:grid-cols-3">
+                          <div className="rounded border border-sky-200 bg-white px-3 py-2">
+                            Status: <span className="font-medium">{activeInterview.status}</span>
+                          </div>
+                          <div className="rounded border border-sky-200 bg-white px-3 py-2">
+                            Approved items: <span className="font-medium">{activeInterview.approved_items}</span>
+                          </div>
+                          <div className="rounded border border-sky-200 bg-white px-3 py-2">
+                            Total items: <span className="font-medium">{activeInterview.total_items}</span>
+                          </div>
+                        </div>
+
+                        {activeInterview.current_item_id === selectedEvidenceItem?.id && (
+                          <div className="rounded border border-sky-200 bg-white px-3 py-2 text-xs text-sky-800">
+                            Completeness {Math.round(activeInterview.completeness_score * 100)}%
+                            {" · "}
+                            Open gaps: {activeInterview.open_gaps.length ? activeInterview.open_gaps.join(", ") : "none"}
+                            {" · "}
+                            Combined score: {formatPercentScore(activeInterview.overall_profile_score)}
+                          </div>
+                        )}
+
+                        {activeInterview.status === "waiting_for_user" && (
+                          <div className="rounded border border-sky-200 bg-white p-3">
+                            <p className="text-sm font-medium text-sky-900">
+                              {activeInterview.current_prompt.question || activeInterview.current_question}
+                            </p>
+                            {activeInterview.current_prompt.source_basis.length > 0 && (
+                              <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+                                <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                                  Why Envoy suggested this
+                                </p>
+                                <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-slate-600">
+                                  {activeInterview.current_prompt.source_basis.map((basis) => (
+                                    <li key={basis}>{basis}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                            {activeInterview.current_prompt.improvement_hint && (
+                              <div className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                <span className="font-medium">How to make it stronger:</span>{" "}
+                                {activeInterview.current_prompt.improvement_hint}
+                              </div>
+                            )}
+                            {(activeInterview.last_answer_assessment.strengths.length > 0 ||
+                              activeInterview.last_answer_assessment.weaknesses.length > 0 ||
+                              activeInterview.last_answer_assessment.next_focus) && (
+                              <div className="mt-3 rounded border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-950 space-y-2">
+                                <p className="font-medium">
+                                  Latest answer quality: {formatPercentScore(activeInterview.last_answer_assessment.score)}
+                                </p>
+                                {activeInterview.last_answer_assessment.strengths.length > 0 && (
+                                  <p>
+                                    Strongest signals: {activeInterview.last_answer_assessment.strengths.join(", ")}.
+                                  </p>
+                                )}
+                                {activeInterview.last_answer_assessment.weaknesses.length > 0 && (
+                                  <p>
+                                    Still weak: {activeInterview.last_answer_assessment.weaknesses.join(", ")}.
+                                  </p>
+                                )}
+                                {activeInterview.last_answer_assessment.next_focus && (
+                                  <p>
+                                    Next focus: {activeInterview.last_answer_assessment.next_focus}
+                                  </p>
+                                )}
+                              </div>
+                            )}
+                            <textarea
+                              value={interviewAnswer}
+                              onChange={(event) => setInterviewAnswer(event.target.value)}
+                              rows={4}
+                              className="mt-3 w-full rounded border border-sky-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                              placeholder="Envoy will prefill a draft answer here when it has enough context"
+                            />
+                            <div className="mt-3 flex items-center gap-3">
+                              <button
+                                onClick={() => void handleAnswerInterview()}
+                                disabled={!interviewAnswer.trim() || answerInterviewMutation.isPending}
+                                className="rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+                              >
+                                {answerInterviewMutation.isPending ? "Saving answer…" : "Use this answer"}
+                              </button>
+                              <button
+                                onClick={() => void handleDeferInterview()}
+                                disabled={deferInterviewMutation.isPending}
+                                className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                              >
+                                {deferInterviewMutation.isPending ? "Continuing…" : "Use this and continue"}
+                              </button>
+                              <button
+                                onClick={() => void handleCompleteInterview()}
+                                disabled={completeInterviewMutation.isPending}
+                                className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                              >
+                                {completeInterviewMutation.isPending ? "Ending…" : "End interview"}
+                              </button>
+                              <span className="text-xs text-sky-700">
+                                Edit the draft however you like. Envoy will rewrite the evidence item and then ask the next best follow-up.
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {activeInterview.status === "reviewing" && (
+                          <div className="rounded border border-sky-200 bg-white p-3">
+                            <p className="text-sm text-sky-900">
+                              This evidence item is ready for approval. Approve it to save it into the canonical profile and move to the next item.
+                            </p>
+                            <button
+                              onClick={() => void handleApproveInterview()}
+                              disabled={approveInterviewMutation.isPending}
+                              className="mt-3 rounded bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-50"
+                            >
+                              {approveInterviewMutation.isPending ? "Approving…" : "Approve item"}
+                            </button>
+                            <button
+                              onClick={() => void handleDeferInterview()}
+                              disabled={deferInterviewMutation.isPending}
+                              className="mt-3 ml-3 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              {deferInterviewMutation.isPending ? "Continuing…" : "Use this and continue"}
+                            </button>
+                            <button
+                              onClick={() => void handleCompleteInterview()}
+                              disabled={completeInterviewMutation.isPending}
+                              className="mt-3 ml-3 rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                            >
+                              {completeInterviewMutation.isPending ? "Ending…" : "End interview"}
+                            </button>
+                          </div>
+                        )}
+
+                        {activeInterview.status === "completed" && (
+                          <p className="text-sm text-green-700">
+                            Profile interview complete. Envoy has stepped through the available evidence items for this phase.
+                          </p>
+                        )}
+
+                        {activeInterview.error && (
+                          <p className="text-sm text-red-600">{activeInterview.error}</p>
+                        )}
+                      </div>
+                    )}
+
+                    {startInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(startInterviewMutation.error as Error).message}
+                      </p>
+                    )}
+                    {answerInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(answerInterviewMutation.error as Error).message}
+                      </p>
+                    )}
+                    {approveInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(approveInterviewMutation.error as Error).message}
+                      </p>
+                    )}
+                    {deferInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(deferInterviewMutation.error as Error).message}
+                      </p>
+                    )}
+                    {completeInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(completeInterviewMutation.error as Error).message}
+                      </p>
+                    )}
+                    {selectInterviewMutation.isError && (
+                      <p className="text-sm text-red-600">
+                        {(selectInterviewMutation.error as Error).message}
+                      </p>
+                    )}
                     </div>
-                  )}
+                  </div>
 
                   {saveTargetMutation.isSuccess && (
                     <p className="text-sm text-green-700">

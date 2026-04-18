@@ -193,6 +193,19 @@ export const canonicalEvidenceItemSchema = z.object({
 });
 export type CanonicalEvidenceItem = z.infer<typeof canonicalEvidenceItemSchema>;
 
+export const voiceProfileSchema = z.object({
+  tone_labels: z.array(z.string()).default([]),
+  formality: z.string().default(""),
+  sentence_style: z.string().default(""),
+  uses_contractions: z.boolean().nullable().optional(),
+  prefers_first_person: z.boolean().nullable().optional(),
+  opening_style: z.string().default(""),
+  strengths: z.array(z.string()).default([]),
+  avoid: z.array(z.string()).default([]),
+  confidence: z.string().default("draft"),
+});
+export type VoiceProfile = z.infer<typeof voiceProfileSchema>;
+
 export const canonicalProfileSchema = z.object({
   name: z.string().default(""),
   headline: z.string().default(""),
@@ -202,6 +215,17 @@ export const canonicalProfileSchema = z.object({
   salary_expectation: z.string().nullable().optional(),
   core_strengths: z.array(z.string()).default([]),
   voice_samples: z.array(z.string()).default([]),
+  voice_profile: voiceProfileSchema.default({
+    tone_labels: [],
+    formality: "",
+    sentence_style: "",
+    uses_contractions: null,
+    prefers_first_person: null,
+    opening_style: "",
+    strengths: [],
+    avoid: [],
+    confidence: "draft",
+  }),
   evidence_items: z.array(canonicalEvidenceItemSchema).default([]),
 });
 export type CanonicalProfile = z.infer<typeof canonicalProfileSchema>;
@@ -224,6 +248,61 @@ export const profileAnswerSchema = z.object({
   value: z.string().default(""),
 });
 export type ProfileAnswer = z.infer<typeof profileAnswerSchema>;
+
+export const profileInterviewPromptSchema = z.object({
+  question_id: z.string().default(""),
+  question: z.string().default(""),
+  suggested_answer: z.string().default(""),
+  source_basis: z.array(z.string()).default([]),
+  improvement_hint: z.string().default(""),
+});
+export type ProfileInterviewPrompt = z.infer<typeof profileInterviewPromptSchema>;
+
+export const profileInterviewAnswerAssessmentSchema = z.object({
+  score: z.number().default(0),
+  dimension_scores: z.record(z.number()).default({}),
+  strengths: z.array(z.string()).default([]),
+  weaknesses: z.array(z.string()).default([]),
+  next_focus: z.string().default(""),
+  confidence: z.string().default("draft"),
+});
+export type ProfileInterviewAnswerAssessment = z.infer<typeof profileInterviewAnswerAssessmentSchema>;
+
+export const profileInterviewSessionResponseSchema = z.object({
+  session_id: z.string(),
+  status: z.string(),
+  source_profile_path: z.string(),
+  target_profile_path: z.string(),
+  current_item_id: z.string().default(""),
+  draft_item: canonicalEvidenceItemSchema.nullable().optional(),
+  open_gaps: z.array(z.string()).default([]),
+  current_gap: z.string().default(""),
+  current_question_id: z.string().default(""),
+  current_question: z.string().default(""),
+  current_prompt: profileInterviewPromptSchema.default({
+    question_id: "",
+    question: "",
+    suggested_answer: "",
+    source_basis: [],
+    improvement_hint: "",
+  }),
+  last_answer_assessment: profileInterviewAnswerAssessmentSchema.default({
+    score: 0,
+    dimension_scores: {},
+    strengths: [],
+    weaknesses: [],
+    next_focus: "",
+    confidence: "draft",
+  }),
+  item_quality_scores: z.record(z.number()).default({}),
+  completeness_score: z.number().default(0),
+  overall_answer_quality_score: z.number().nullable().optional(),
+  overall_profile_score: z.number().nullable().optional(),
+  approved_items: z.number().default(0),
+  total_items: z.number().default(0),
+  error: z.string().nullable().optional(),
+});
+export type ProfileInterviewSessionResponse = z.infer<typeof profileInterviewSessionResponseSchema>;
 
 export const profileTargetResponseSchema = z.object({
   profile_exists: z.boolean(),

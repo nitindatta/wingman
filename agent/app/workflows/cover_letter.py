@@ -74,6 +74,7 @@ class CoverLetterState(BaseModel):
     tone: str = "consultative, senior, practical"
     max_words: int = 320
     writing_samples: list[str] = Field(default_factory=list)  # user's own sentences to mirror
+    voice_profile: dict[str, Any] = Field(default_factory=dict)
 
     # Pre-populated from cache (skips parse_jd LLM call when set)
     cached_must_have: list[str] = Field(default_factory=list)
@@ -376,6 +377,26 @@ Skills: {state.skills}"""
             # Build voice block — writing_samples first (most direct signal),
             # fall back to summary (also written by the candidate in their own words)
             voice_lines: list[str] = []
+            if state.voice_profile:
+                voice_lines.append("VOICE PROFILE — stable writing habits to preserve:")
+                tone_labels = state.voice_profile.get("tone_labels") or []
+                if tone_labels:
+                    voice_lines.append(f"  tone_labels: {', '.join(tone_labels)}")
+                for key in (
+                    "formality",
+                    "sentence_style",
+                    "opening_style",
+                ):
+                    value = state.voice_profile.get(key)
+                    if value:
+                        voice_lines.append(f"  {key}: {value}")
+                for key in ("uses_contractions", "prefers_first_person"):
+                    value = state.voice_profile.get(key)
+                    if isinstance(value, bool):
+                        voice_lines.append(f"  {key}: {'yes' if value else 'no'}")
+                avoid = state.voice_profile.get("avoid") or []
+                if avoid:
+                    voice_lines.append(f"  avoid: {', '.join(avoid)}")
             if state.writing_samples:
                 voice_lines.append("VOICE SAMPLES — sentences this person has actually written:")
                 for s in state.writing_samples:
@@ -554,6 +575,15 @@ async def run_cover_letter(
     cached_analysis=None,
 ) -> CoverLetterResult:
     prefs = profile.get("proposal_preferences", {})
+    writing_samples = (
+        profile.get("writing_samples")
+        or profile.get("voice_samples")
+        or [
+            item.get("tone_sample", "")
+            for item in profile.get("evidence_items", [])
+            if isinstance(item, dict) and item.get("tone_sample")
+        ]
+    )
 
     initial = CoverLetterState(
         job_title=job.title,
@@ -569,7 +599,8 @@ async def run_cover_letter(
         skills=", ".join(profile.get("core_strengths", [])),
         tone=prefs.get("tone", "consultative, senior, practical"),
         max_words=prefs.get("max_words", 320),
-        writing_samples=profile.get("writing_samples", []),
+        writing_samples=writing_samples,
+        voice_profile=profile.get("voice_profile", {}),
         cached_must_have=cached_analysis.must_have if cached_analysis else [],
         cached_duties=cached_analysis.duties if cached_analysis else [],
         cached_nice_to_have=cached_analysis.nice_to_have if cached_analysis else [],

@@ -14,11 +14,11 @@ def test_build_raw_profile_from_legacy_json_maps_existing_profile_shape() -> Non
         sha256="abc123",
     )
     legacy = {
-        "name": "Nitin Datta",
+        "name": "Alex Test",
         "headline": "AI & Data Systems Engineer",
         "contact": {
-            "email": "nitin.datta@outlook.com",
-            "phone": "+61 0414911261",
+            "email": "alex.test@example.com",
+            "phone": "+61 0400000000",
         },
         "summary": "Hands-on data engineer.",
         "core_strengths": ["Databricks", "FastAPI"],
@@ -41,14 +41,14 @@ def test_build_raw_profile_from_legacy_json_maps_existing_profile_shape() -> Non
                 "summary": "Autonomous job application agent with FastAPI and Playwright.",
             }
         ],
-        "education": ["Bachelor of Science, University of Delhi"],
+        "education": ["Bachelor of Science, University of Example"],
         "certifications": ["AWS Solutions Architect Associate"],
     }
 
     raw = build_raw_profile_from_legacy_json(legacy, source)
 
-    assert raw.identity.name == "Nitin Datta"
-    assert raw.identity.email == "nitin.datta@outlook.com"
+    assert raw.identity.name == "Alex Test"
+    assert raw.identity.email == "alex.test@example.com"
     assert raw.skills == ["Databricks", "FastAPI"]
     assert len(raw.experience) == 1
     assert raw.experience[0].company == "Department for Education"
@@ -69,9 +69,9 @@ def test_build_raw_profile_from_markdown_extracts_core_sections() -> None:
         extracted_text_path="C:/tmp/resume.md",
     )
     markdown = """
-Nitin Datta
+Alex Test
 AI & Data Systems Engineer
-nitin.datta@outlook.com | +61 0414911261 | Adelaide
+alex.test@example.com | +61 0400000000 | Test City
 
 # Summary
 Hands-on data engineer focused on practical AI and data systems.
@@ -90,14 +90,14 @@ Hands-on data engineer focused on practical AI and data systems.
 Databricks, FastAPI, Playwright, Python
 
 # Education
-Bachelor of Science, University of Delhi
+Bachelor of Science, University of Example
 """.strip()
 
     raw = build_raw_profile_from_markdown(markdown, source)
 
-    assert raw.identity.name == "Nitin Datta"
-    assert raw.identity.email == "nitin.datta@outlook.com"
-    assert raw.identity.phone == "+61 0414911261"
+    assert raw.identity.name == "Alex Test"
+    assert raw.identity.email == "alex.test@example.com"
+    assert raw.identity.phone == "+61 0400000000"
     assert raw.summary == "Hands-on data engineer focused on practical AI and data systems."
     assert len(raw.experience) == 1
     assert raw.experience[0].title == "Data Engineer"
@@ -117,13 +117,13 @@ def test_build_raw_profile_from_docling_markdown_extracts_resume_sections() -> N
         extracted_text_path="C:/tmp/resume.md",
     )
     markdown = """
-# Nitin Datta
+# Alex Test
 
 AI &amp; Data Systems Engineer | LLM Systems | Distributed Platforms
 
-Adelaide, South Australia | Open to relocate
+Test City, Test State | Open to relocate
 
-nitin.datta@outlook.com | +61 0414911261 | GitHub: github.com/nitindatta
+alex.test@example.com | +61 0400000000 | GitHub: github.com/alextest
 
 ## Summary
 
@@ -153,7 +153,7 @@ Independent Consultant (2020\u00e2\u20ac\u201cPresent)
 
 ## Education
 
-Bachelor of Science \u00e2\u20ac\u201d University of Delhi
+Bachelor of Science \u00e2\u20ac\u201d University of Example
 
 ## Certifications
 
@@ -162,9 +162,9 @@ AWS Solutions Architect Associate
 
     raw = build_raw_profile_from_markdown(markdown, source)
 
-    assert raw.identity.name == "Nitin Datta"
+    assert raw.identity.name == "Alex Test"
     assert raw.identity.headline == "AI & Data Systems Engineer | LLM Systems | Distributed Platforms"
-    assert raw.identity.location == "Adelaide, South Australia | Open to relocate"
+    assert raw.identity.location == "Test City, Test State | Open to relocate"
     assert raw.summary.startswith("I'm a hands-on engineer")
     assert raw.skills[:5] == [
         "LLM pipelines",
@@ -181,7 +181,7 @@ AWS Solutions Architect Associate
     assert raw.experience[0].company == "Department for Education, South Australia"
     assert raw.experience[0].period_raw == "2025-Present"
     assert "Databricks" in raw.experience[0].technologies
-    assert raw.education == ["Bachelor of Science - University of Delhi"]
+    assert raw.education == ["Bachelor of Science - University of Example"]
     assert raw.certifications == ["AWS Solutions Architect Associate"]
     assert raw.parse_notes == []
 
@@ -196,7 +196,7 @@ def test_build_raw_profile_from_linkedin_markdown_recognizes_top_skills() -> Non
         extracted_text_path="C:/tmp/profile.md",
     )
     markdown = """
-Contact nitin.datta@gmail.com www.linkedin.com/in/nitindatta (LinkedIn)
+Contact alex.test@example.com www.linkedin.com/in/alextest (LinkedIn)
 
 ## Top Skills
 
@@ -208,7 +208,7 @@ Data Architects Databricks SQL Server Integration Services
 
 Hands-on Data Engineer and Architect focused on building scalable data systems.
 
-## Nitin Datta
+## Alex Test
 
 Engineering Australia
 
@@ -223,7 +223,7 @@ June 2022 - Present (3 years 11 months)
 
     raw = build_raw_profile_from_markdown(markdown, source)
 
-    assert raw.identity.name == "Nitin Datta"
+    assert raw.identity.name == "Alex Test"
     assert raw.identity.phone == ""
     assert raw.skills == [
         "Data Architects Databricks SQL Server Integration Services",
