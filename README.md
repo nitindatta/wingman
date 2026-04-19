@@ -6,6 +6,8 @@ A local, review-first autonomous job application agent. Envoy searches SEEK for 
 
 ## How it works
 
+For a full visual map of the current product flow, see [docs/envoy-flow.md](docs/envoy-flow.md).
+
 ### Three services, one-way data flow
 
 ```
