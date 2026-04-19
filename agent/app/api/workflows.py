@@ -11,6 +11,7 @@ from app.state.prepare import PrepareRequest, PrepareResponse
 from app.providers import registry
 from app.tools.indeed import IndeedDriftError, IndeedToolError
 from app.tools.seek import SeekDriftError, SeekToolError
+from app.tools.indeed_detail import IndeedDetailDriftError, IndeedDetailError
 from app.tools.seek_detail import SeekDetailDriftError, SeekDetailError
 from app.workflows.apply import resume_apply, run_apply
 from app.workflows.prepare import run_prepare
@@ -35,6 +36,10 @@ async def start_prepare(request: Request, body: PrepareRequest) -> PrepareRespon
         raise HTTPException(status_code=503, detail=f"seek detail drift: {exc.reason}")
     except SeekDetailError as exc:
         raise HTTPException(status_code=502, detail=f"seek detail error: {exc.error.type}")
+    except IndeedDetailDriftError as exc:
+        raise HTTPException(status_code=503, detail=f"indeed detail drift: {exc.reason}")
+    except IndeedDetailError as exc:
+        raise HTTPException(status_code=502, detail=f"indeed detail error: {exc.error.type}")
 
     if state.error:
         raise HTTPException(status_code=422, detail=state.error)

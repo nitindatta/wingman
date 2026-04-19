@@ -150,8 +150,8 @@ export default function JobsPage() {
   });
 
   const jobsQuery = useQuery({
-    queryKey: ["jobs", "active", activeTag],
-    queryFn: () => fetchJobs({ exclude: "ignored,in_review", keyword: activeTag }),
+    queryKey: ["jobs", "active", provider, activeTag],
+    queryFn: () => fetchJobs({ exclude: "ignored,in_review", provider, keyword: activeTag }),
   });
 
   const searchMutation = useMutation({

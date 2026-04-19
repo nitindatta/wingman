@@ -5,6 +5,7 @@ import { ok } from './envelope.js';
 import { registerSeekSearchRoute } from './providers/seek/search.js';
 import { registerSeekDetailRoute } from './providers/seek/detail.js';
 import { registerIndeedSearchRoute } from './providers/indeed/search.js';
+import { registerIndeedDetailRoute } from './providers/indeed/detail.js';
 import { registerBrowserRoutes } from './browser/routes.js';
 
 export function buildServer(secret: string) {
@@ -34,6 +35,7 @@ export function buildServer(secret: string) {
   registerSeekSearchRoute(app);
   registerSeekDetailRoute(app);
   registerIndeedSearchRoute(app);
+  registerIndeedDetailRoute(app);
   registerBrowserRoutes(app);
 
   return app;
