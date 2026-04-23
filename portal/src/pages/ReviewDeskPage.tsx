@@ -14,7 +14,7 @@ import {
   cancelApplication,
   resetApplication,
 } from "../api/applications";
-import { applyStepResponseSchema, type Application, type ApplyStepResponse } from "../api/schemas";
+import { applyStepResponseSchema, type Application, type ApplyStepResponse, type FieldInfo } from "../api/schemas";
 
 // ---------------------------------------------------------------------------
 // State metadata
@@ -429,6 +429,38 @@ function SpinnerPanel({ message, subtext }: { message: string; subtext?: string 
   );
 }
 
+function buildFieldLookup(appStep: ApplyStepResponse): Map<string, FieldInfo> {
+  const fieldsById = new Map<string, FieldInfo>();
+  const addFields = (fields: FieldInfo[] | undefined) => {
+    for (const field of fields ?? []) {
+      if (field.id && !fieldsById.has(field.id)) {
+        fieldsById.set(field.id, field);
+      }
+    }
+  };
+
+  addFields(appStep.step?.fields);
+  for (const entry of appStep.step_history) {
+    addFields(entry.step.fields);
+  }
+  return fieldsById;
+}
+
+function isSyntheticQuestionText(value: string, fieldId: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.length === 0 ||
+    trimmed === fieldId ||
+    /^question[-_]/i.test(trimmed) ||
+    /^questionnaire\./i.test(trimmed)
+  );
+}
+
+function fallbackQuestionLabel(fieldId: string): string {
+  const match = fieldId.match(/qbg_(\d+)q/i);
+  return match ? `Screening question ${match[1]}` : "Screening question";
+}
+
 // ---------------------------------------------------------------------------
 // Gate panel (needs_review)
 // ---------------------------------------------------------------------------
@@ -442,6 +474,7 @@ function GatePanel({ appStep, gateAnswers, setGateAnswers, onSubmit, isPending, 
   error: string | null;
 }) {
   const lowIds = appStep.low_confidence_ids ?? [];
+  const fieldsById = buildFieldLookup(appStep);
   if (lowIds.length === 0) {
     return (
       <div style={{ padding: "1.25rem", background: "#f0f9ff", border: "1px solid #0ea5e9", borderRadius: 6 }}>
@@ -458,8 +491,9 @@ function GatePanel({ appStep, gateAnswers, setGateAnswers, onSubmit, isPending, 
         The AI wasn't confident about {lowIds.length === 1 ? "this question" : "these questions"}. Answer below to continue the application.
       </p>
       {lowIds.map((fieldId) => {
-        const field = appStep.step?.fields?.find((f) => f.id === fieldId);
-        const label = field?.label ?? fieldId;
+        const field = fieldsById.get(fieldId);
+        const rawLabel = field?.label ?? "";
+        const label = isSyntheticQuestionText(rawLabel, fieldId) ? fallbackQuestionLabel(fieldId) : rawLabel;
         const proposed = appStep.proposed_values[fieldId] ?? "";
         const current = gateAnswers[fieldId] ?? proposed;
         return (

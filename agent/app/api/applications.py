@@ -231,6 +231,21 @@ def _external_url_from_last_step(last_apply_step_json: str | None) -> str | None
     return page_url if isinstance(page_url, str) and page_url else None
 
 
+def _fields_by_id_from_apply_payload(step_data: dict) -> dict[str, dict]:
+    fields_by_id: dict[str, dict] = {}
+
+    def remember(fields: list[dict] | None) -> None:
+        for field in fields or []:
+            field_id = field.get("id")
+            if isinstance(field_id, str) and field_id and field_id not in fields_by_id:
+                fields_by_id[field_id] = field
+
+    remember((step_data.get("step") or {}).get("fields"))
+    for entry in step_data.get("step_history") or []:
+        remember((entry.get("step") or {}).get("fields"))
+    return fields_by_id
+
+
 @router.post("/applications/{app_id}/external_harness", response_model=dict)
 async def enqueue_external_harness(
     app_id: str,
@@ -280,17 +295,15 @@ async def enqueue_gate_resume(app_id: str, request: Request, body: GateResumeReq
     if body.approved_values and app.last_apply_step_json:
         try:
             step = json.loads(app.last_apply_step_json)
-            fields_by_id = {
-                f["id"]: f
-                for f in (step.get("step", {}) or {}).get("fields", [])
-            }
+            fields_by_id = _fields_by_id_from_apply_payload(step)
             for field_id, answer in body.approved_values.items():
                 if field_id.startswith("__external_apply_"):
                     continue
                 field_meta = fields_by_id.get(field_id)
                 label = field_meta["label"] if field_meta else field_id
                 field_type = field_meta["field_type"] if field_meta else None
-                if label and answer is not None:
+                required = bool(field_meta.get("required")) if field_meta else False
+                if label and answer is not None and (answer.strip() or not required):
                     await cache_repo.save(label, answer, field_type=field_type)
                     log.info("[gate] cached answer for label=%r answer=%r", label, answer)
         except Exception:
@@ -335,7 +348,7 @@ async def enqueue_submit(app_id: str, request: Request, body: SubmitRequest):
                     if f.get("label"):
                         field_types[f["label"]] = f.get("field_type", "text")
             for label, answer in body.corrected_values.items():
-                if label and answer is not None:
+                if label and answer is not None and answer.strip():
                     await cache_repo.save(label, answer, field_type=field_types.get(label))
                     log.info("[submit] cached corrected answer label=%r answer=%r", label, answer)
         except Exception:

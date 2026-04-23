@@ -3,7 +3,7 @@
 Resolution order:
   1. Profile lookup (name, email, phone, work rights, location)
   2. Cache lookup (question_answer_cache table — keyword/token overlap match)
-  3. LLM call (only for fields not resolved above)
+  3. Batched LLM call (only for fields not resolved above)
   4. Pause (interrupt) if LLM confidence is low
 """
 
@@ -252,6 +252,132 @@ Answer this field truthfully for the candidate. Return only JSON."""
 LOW_CONFIDENCE_THRESHOLD = 0.6
 
 
+async def _resolve_batch_via_llm(
+    fields_with_hints: list[tuple[FieldInfo, str | None]],
+    profile: dict,
+    settings: Settings,
+    cover_letter: str,
+) -> dict[str, tuple[str, float]]:
+    """Resolve multiple fields in one LLM request."""
+    if not fields_with_hints:
+        return {}
+
+    client = AsyncOpenAI(base_url=settings.openai_base_url, api_key=settings.openai_api_key)
+
+    exp_lines = []
+    for exp in profile.get("experience", [])[:4]:
+        techs = exp.get("technologies", []) + exp.get("skills", [])
+        line = f"- {exp.get('title','')} at {exp.get('company','')} ({exp.get('period','')})"
+        if techs:
+            line += f": {', '.join(techs[:8])}"
+        exp_lines.append(line)
+    experience_block = "\n".join(exp_lines) or "Not provided"
+    skills_block = ", ".join(profile.get("core_strengths", []))
+    narrative_block = "\n".join(
+        f"- {s}" for s in profile.get("narrative_strengths", [])[:5]
+    )
+    fields_payload = [
+        {
+            "id": field.id,
+            "label": field.label,
+            "field_type": field.field_type,
+            "required": field.required,
+            "options": field.options or [],
+            "current_value": field.current_value,
+            "profile_hint": profile_hint,
+        }
+        for field, profile_hint in fields_with_hints
+    ]
+
+    system = (
+        "You are filling out a job application form on behalf of a candidate. "
+        "Answer each question accurately based solely on the candidate's profile below. "
+        "For yes/no or radio questions: pick the option that is most truthful given the candidate's experience. "
+        "If the candidate clearly does NOT have the stated experience, answer 'No'. "
+        "Set confidence < 0.6 if you are genuinely unsure. "
+        "Return JSON only: {\"answers\": [{\"id\": \"field-id\", \"answer\": \"...\", \"confidence\": 0.0-1.0}]}. "
+        "Return exactly one answer object for every requested field id."
+    )
+    user = f"""Form fields:
+{json.dumps(fields_payload, ensure_ascii=False, indent=2)}
+
+Candidate profile:
+Name: {profile.get('name')}
+Location: {profile.get('location')}
+Summary: {profile.get('summary', '')[:300]}
+
+Experience:
+{experience_block}
+
+Skills: {skills_block}
+
+Key achievements:
+{narrative_block}
+
+Cover letter excerpt: {cover_letter[:400] if cover_letter else 'N/A'}
+Answer every field truthfully for the candidate. For select/radio fields, use the exact option text when possible. Return only JSON."""
+
+    response = await client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        temperature=0.2,
+        max_tokens=min(2500, max(400, len(fields_with_hints) * 160)),
+    )
+    raw = response.choices[0].message.content or "{}"
+    requested_ids = {field.id for field, _ in fields_with_hints}
+    try:
+        parsed = json.loads(raw)
+        rows = parsed.get("answers", parsed if isinstance(parsed, list) else [])
+        if isinstance(rows, dict):
+            rows = [
+                {"id": field_id, **payload}
+                for field_id, payload in rows.items()
+                if isinstance(payload, dict)
+            ]
+
+        results: dict[str, tuple[str, float]] = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            field_id = str(row.get("id", ""))
+            if field_id not in requested_ids:
+                continue
+            answer = str(row.get("answer", ""))
+            try:
+                confidence = float(row.get("confidence", 0.5))
+            except (TypeError, ValueError):
+                confidence = 0.5
+            results[field_id] = (answer, confidence)
+
+        for field, _ in fields_with_hints:
+            results.setdefault(field.id, ("", 0.3))
+        return results
+    except (json.JSONDecodeError, ValueError):
+        return {field.id: (raw.strip(), 0.3) for field, _ in fields_with_hints}
+
+
+def _is_blank(value: str) -> bool:
+    return value.strip() == ""
+
+
+def _requires_nonblank(field: FieldInfo) -> bool:
+    return field.required or field.field_type == "select"
+
+
+def _record_missing_required(
+    field: FieldInfo,
+    proposed: dict[str, str],
+    low_confidence: list[str],
+    source: str,
+) -> bool:
+    if _requires_nonblank(field) and _is_blank(proposed.get(field.id, "")):
+        if field.id not in low_confidence:
+            low_confidence.append(field.id)
+        log.info("[field:%s] label=%r needs review: %s returned blank required value", field.id, field.label, source)
+        return True
+    return False
+
+
 async def propose_field_values(
     fields: list[FieldInfo],
     profile: dict,
@@ -267,6 +393,7 @@ async def propose_field_values(
     """
     proposed: dict[str, str] = {}
     low_confidence: list[str] = []
+    llm_fields: list[tuple[FieldInfo, str | None]] = []
 
     log.info("[propose_field_values] resolving %d fields", len(fields))
 
@@ -326,6 +453,8 @@ async def propose_field_values(
         value = await _lookup_from_cache(field, question_cache)
         if value is not None:
             proposed[field.id] = value
+            if _record_missing_required(field, proposed, low_confidence, "cache"):
+                continue
             log.debug("[field:%s] label=%r → cache value=%r", field.id, field.label, value)
             continue
 
@@ -338,15 +467,27 @@ async def propose_field_values(
             continue
 
         # 3. LLM — pass the profile hint so it doesn't guess freely
-        value, confidence = await _resolve_via_llm(field, profile, settings, cover_letter, profile_hint=profile_hint)
-        proposed[field.id] = value
-        if confidence >= LOW_CONFIDENCE_THRESHOLD:
-            await _save_to_cache(field, value, question_cache, source="llm")
-        if confidence < LOW_CONFIDENCE_THRESHOLD:
-            low_confidence.append(field.id)
-            log.info("[field:%s] label=%r → LLM LOW_CONF=%.2f value=%r", field.id, field.label, confidence, value)
-        else:
-            log.debug("[field:%s] label=%r → LLM conf=%.2f value=%r", field.id, field.label, confidence, value)
+        llm_fields.append((field, profile_hint))
+    if llm_fields:
+        log.info("[propose_field_values] resolving %d fields via one LLM batch", len(llm_fields))
+        llm_results = await _resolve_batch_via_llm(
+            llm_fields,
+            profile=profile,
+            settings=settings,
+            cover_letter=cover_letter,
+        )
+        for field, _profile_hint in llm_fields:
+            value, confidence = llm_results.get(field.id, ("", 0.3))
+            proposed[field.id] = value
+            if _record_missing_required(field, proposed, low_confidence, "LLM"):
+                continue
+            if confidence >= LOW_CONFIDENCE_THRESHOLD:
+                await _save_to_cache(field, value, question_cache, source="llm")
+            if confidence < LOW_CONFIDENCE_THRESHOLD:
+                low_confidence.append(field.id)
+                log.info("[field:%s] label=%r → LLM LOW_CONF=%.2f value=%r", field.id, field.label, confidence, value)
+            else:
+                log.debug("[field:%s] label=%r → LLM conf=%.2f value=%r", field.id, field.label, confidence, value)
 
     log.info("[propose_field_values] done: proposed=%d low_confidence=%s", len(proposed), low_confidence)
     return proposed, low_confidence

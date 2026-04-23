@@ -92,6 +92,7 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
 
   // Extract form fields (generic — works on any site using standard HTML inputs)
   const fields = await extractFields(page);
+  markRequiredFromValidationText(fields, pageText);
 
   // Extract visible action buttons
   const _noisePatterns = /^(open app|get app|download|sign in|log in|back|cancel|close|dismiss)$/i;
@@ -137,6 +138,32 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
       visible_actions,
     },
   };
+}
+
+function validationText(text: string): string {
+  return text
+    .replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '')
+    .replace(/:/g, '')
+    .replace(/\s*-\s*/g, ' - ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function markRequiredFromValidationText(fields: FieldInfo[], pageText: string): void {
+  const normalizedPage = validationText(pageText);
+  if (!normalizedPage) return;
+
+  for (const field of fields) {
+    const label = validationText(field.label);
+    if (!label) continue;
+    if (
+      normalizedPage.includes(`${label} - required field`) ||
+      normalizedPage.includes(`${label} - please make a selection`)
+    ) {
+      field.required = true;
+    }
+  }
 }
 
 async function extractFields(page: Page): Promise<FieldInfo[]> {
