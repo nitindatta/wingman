@@ -7,6 +7,7 @@
  */
 
 import type { FastifyInstance } from 'fastify';
+import type { Locator, Page } from 'playwright-core';
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
@@ -29,9 +30,53 @@ const PROVIDER_LOGIN_URLS: Record<string, string> = {
   seek: 'https://www.seek.com.au/oauth/login/',
   linkedin: 'https://www.linkedin.com/login',
 };
+const FIELD_ACTION_TIMEOUT_MS = 5_000;
 
 function sessionError(key: string) {
   return error('session_not_found', `no active session for key ${key}`);
+}
+
+function attributeValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+async function firstVisible(locator: Locator): Promise<Locator | null> {
+  const count = await locator.count().catch(() => 0);
+  for (let index = 0; index < Math.min(count, 20); index += 1) {
+    const candidate = locator.nth(index);
+    if (await candidate.isVisible().catch(() => false)) return candidate;
+  }
+  return null;
+}
+
+async function resolveFillTarget(page: Page, id: string): Promise<Locator | null> {
+  if (id.startsWith('__lbl_')) {
+    const labelKey = id.replace(/^__lbl_/, '').replace(/__$/, '').replace(/_/g, ' ');
+    return firstVisible(page.getByLabel(labelKey, { exact: false }));
+  }
+
+  const escaped = attributeValue(id);
+  const native = page.locator(`[id="${escaped}"], [name="${escaped}"]`);
+  const visibleNative = await firstVisible(native);
+  if (visibleNative) return visibleNative;
+
+  const data = page.locator(`[data-testid="${escaped}"], [data-automation="${escaped}"]`);
+  return firstVisible(data);
+}
+
+async function resolveAttachedTarget(page: Page, id: string): Promise<Locator | null> {
+  if (id.startsWith('__lbl_')) {
+    const labelKey = id.replace(/^__lbl_/, '').replace(/__$/, '').replace(/_/g, ' ');
+    const label = page.getByLabel(labelKey, { exact: false });
+    return (await label.count().catch(() => 0)) ? label.first() : null;
+  }
+
+  const escaped = attributeValue(id);
+  const native = page.locator(`[id="${escaped}"], [name="${escaped}"]`);
+  if (await native.count().catch(() => 0)) return native.first();
+
+  const data = page.locator(`[data-testid="${escaped}"], [data-automation="${escaped}"]`);
+  return (await data.count().catch(() => 0)) ? data.first() : null;
 }
 
 /** Return provider-specific inspect options so inspectStep stays generic. */
