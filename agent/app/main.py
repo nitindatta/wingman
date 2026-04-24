@@ -74,6 +74,9 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
+from app.services.run_events import install_llm_tracing
+install_llm_tracing()
+
 from app.api.applications import router as applications_router
 from app.api.events import router as events_router
 from app.api.health import router as health_router

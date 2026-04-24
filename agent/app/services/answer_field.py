@@ -15,7 +15,6 @@ import logging
 from openai import AsyncOpenAI
 
 from app.persistence.sqlite.question_cache import SqliteQuestionCacheRepository
-from app.services.run_events import emit as _emit
 from app.settings import Settings
 from app.state.apply import FieldInfo
 
@@ -239,6 +238,7 @@ Answer this field truthfully for the candidate. Return only JSON."""
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.2,
         max_tokens=200,
+        _call_name=f"answer_field single: {field.label[:60]}",
     )
     raw = response.choices[0].message.content or "{}"
     try:
@@ -323,6 +323,7 @@ Answer every field truthfully for the candidate. For select/radio fields, use th
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         temperature=0.2,
         max_tokens=min(2500, max(400, len(fields_with_hints) * 160)),
+        _call_name=f"answer_field batch: {len(fields_with_hints)} fields",
     )
     raw = response.choices[0].message.content or "{}"
     requested_ids = {field.id for field, _ in fields_with_hints}
@@ -471,14 +472,12 @@ async def propose_field_values(
         llm_fields.append((field, profile_hint))
     if llm_fields:
         log.info("[propose_field_values] resolving %d fields via one LLM batch", len(llm_fields))
-        _emit("llm_prompt", f"answer_field: LLM batch — {len(llm_fields)} fields", {"call": f"batch resolve {len(llm_fields)} fields", "fields": [f.label for f, _ in llm_fields[:12]]})
         llm_results = await _resolve_batch_via_llm(
             llm_fields,
             profile=profile,
             settings=settings,
             cover_letter=cover_letter,
         )
-        _emit("llm_response", f"answer_field: {len(llm_results)} answers received", {"call": f"batch resolve {len(llm_fields)} fields", "answers": {fid: {"value": str(v)[:60], "confidence": round(c, 2)} for fid, (v, c) in list(llm_results.items())[:12]}})
         for field, _profile_hint in llm_fields:
             value, confidence = llm_results.get(field.id, ("", 0.3))
             proposed[field.id] = value

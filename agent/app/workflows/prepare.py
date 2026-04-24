@@ -26,7 +26,7 @@ from app.persistence.sqlite.jobs import SqliteJobRepository
 from app.settings import Settings
 from app.state.prepare import PrepareState
 from app.providers import registry
-from app.services.run_events import emit as _emit
+from app.services.run_events import emit as _emit, set_node as _set_node
 from app.tools.client import ToolClient
 from app.workflows.cover_letter import run_cover_letter
 
@@ -43,6 +43,7 @@ def build_prepare_graph(
     profile = _load_profile(settings)
 
     async def fetch_detail(state: PrepareState) -> dict[str, Any]:
+        _set_node("fetch_detail")
         log.info("[fetch_detail] job_id=%s", state.job_id)
         _emit("node", "fetch_detail: fetching job description", {"job_id": state.job_id})
         job = await job_repo.get(state.job_id)
@@ -65,6 +66,7 @@ def build_prepare_graph(
         return {"detail": detail}
 
     async def generate(state: PrepareState) -> dict[str, Any]:
+        _set_node("generate")
         if state.error or state.detail is None:
             log.warning("[generate] skipping — error=%s detail=%s", state.error, state.detail)
             return {}
@@ -96,6 +98,7 @@ def build_prepare_graph(
         }
 
     async def persist(state: PrepareState) -> dict[str, Any]:
+        _set_node("persist")
         if state.error:
             log.warning("[persist] skipping — error=%s", state.error)
             if existing_app_id:

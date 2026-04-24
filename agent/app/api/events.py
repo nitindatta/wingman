@@ -15,8 +15,14 @@ router = APIRouter()
 
 @router.get("/api/events/stream")
 async def stream_events(request: Request) -> StreamingResponse:
+    raw_last_id = request.headers.get("Last-Event-ID", "0")
+    try:
+        after_seq = int(raw_last_id)
+    except ValueError:
+        after_seq = 0
+
     async def generator():
-        q = await bus.subscribe()
+        q = await bus.subscribe(after_seq=after_seq)
         try:
             while True:
                 if await request.is_disconnected():
@@ -33,7 +39,7 @@ async def stream_events(request: Request) -> StreamingResponse:
                     "ts": event.ts,
                     "data": event.data,
                 }
-                yield f"data: {json.dumps(payload)}\n\n"
+                yield f"id: {event.seq}\ndata: {json.dumps(payload)}\n\n"
         finally:
             bus.unsubscribe(q)
 

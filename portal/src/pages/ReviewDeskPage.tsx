@@ -407,6 +407,85 @@ function CoverLetterSection({ text, onChange, readOnly }: {
   );
 }
 
+function ReviewMaterialsSection({
+  evidence,
+  gaps,
+  fitScore,
+  showEvidence,
+  setShowEvidence,
+  coverLetterText,
+  setCoverLetterText,
+  jobSummary,
+}: {
+  evidence: EvidenceItem[];
+  gaps: string[];
+  fitScore?: number | null;
+  showEvidence: boolean;
+  setShowEvidence: (v: boolean) => void;
+  coverLetterText: string;
+  setCoverLetterText: (value: string) => void;
+  jobSummary: string | null;
+}) {
+  const hasFitContext = evidence.length > 0 || gaps.length > 0 || typeof fitScore === "number";
+
+  return (
+    <>
+      {hasFitContext && (
+        <FitAnalysisPanel evidence={evidence} gaps={gaps} fitScore={fitScore} />
+      )}
+
+      <MatchEvidencePanel
+        evidence={evidence}
+        showEvidence={showEvidence}
+        setShowEvidence={setShowEvidence}
+      />
+
+      <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.5rem" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ marginTop: 0 }}>Cover Letter</h3>
+          <textarea
+            value={coverLetterText}
+            onChange={(e) => setCoverLetterText(e.target.value)}
+            rows={20}
+            style={{
+              width: "100%",
+              padding: "0.75rem",
+              border: "1px solid #d1d5db",
+              borderRadius: 6,
+              fontFamily: "inherit",
+              fontSize: 13,
+              resize: "vertical",
+              whiteSpace: "pre-wrap",
+              boxSizing: "border-box",
+            }}
+          />
+        </div>
+        {jobSummary && (
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3 style={{ marginTop: 0 }}>Job Description</h3>
+            <div
+              style={{
+                padding: "0.75rem",
+                background: "var(--surface-subtle)",
+                border: "1px solid var(--border)",
+                borderRadius: 6,
+                fontSize: 13,
+                color: "var(--text-secondary)",
+                lineHeight: 1.7,
+                whiteSpace: "pre-wrap",
+                overflowY: "auto",
+                maxHeight: "480px",
+              }}
+            >
+              {jobSummary}
+            </div>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Right-panel state panels
 // ---------------------------------------------------------------------------
@@ -1386,7 +1465,16 @@ export default function ReviewDeskPage() {
       return (
         <>
           {header}
-          <CoverLetterSection text={coverLetterText} onChange={setCoverLetterText} />
+          <ReviewMaterialsSection
+            evidence={parsedEvidence}
+            gaps={fitGaps}
+            fitScore={detail.application.fit_score}
+            showEvidence={showEvidence}
+            setShowEvidence={setShowEvidence}
+            coverLetterText={coverLetterText}
+            setCoverLetterText={setCoverLetterText}
+            jobSummary={jobSummary}
+          />
           <div
             style={{
               padding: "1.25rem",
@@ -1439,56 +1527,16 @@ export default function ReviewDeskPage() {
       return (
         <>
           {header}
-
-          <MatchEvidencePanel
+          <ReviewMaterialsSection
             evidence={parsedEvidence}
+            gaps={fitGaps}
+            fitScore={detail.application.fit_score}
             showEvidence={showEvidence}
             setShowEvidence={setShowEvidence}
+            coverLetterText={coverLetterText}
+            setCoverLetterText={setCoverLetterText}
+            jobSummary={jobSummary}
           />
-
-          {/* Cover letter + Job description side by side */}
-          <div style={{ display: "flex", gap: "1.5rem", marginBottom: "1.5rem" }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h3 style={{ marginTop: 0 }}>Cover Letter</h3>
-              <textarea
-                value={coverLetterText}
-                onChange={(e) => setCoverLetterText(e.target.value)}
-                rows={20}
-                style={{
-                  width: "100%",
-                  padding: "0.75rem",
-                  border: "1px solid #d1d5db",
-                  borderRadius: 6,
-                  fontFamily: "inherit",
-                  fontSize: 13,
-                  resize: "vertical",
-                  whiteSpace: "pre-wrap",
-                  boxSizing: "border-box",
-                }}
-              />
-            </div>
-            {jobSummary && (
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <h3 style={{ marginTop: 0 }}>Job Description</h3>
-                <div
-                  style={{
-                    padding: "0.75rem",
-                    background: "var(--surface-subtle)",
-                    border: "1px solid var(--border)",
-                    borderRadius: 6,
-                    fontSize: 13,
-                    color: "var(--text-secondary)",
-                    lineHeight: 1.7,
-                    whiteSpace: "pre-wrap",
-                    overflowY: "auto",
-                    maxHeight: "480px",
-                  }}
-                >
-                  {jobSummary}
-                </div>
-              </div>
-            )}
-          </div>
 
           {/* Action buttons */}
           <div style={{ display: "flex", gap: "0.75rem" }}>
@@ -1578,7 +1626,7 @@ export default function ReviewDeskPage() {
       {/* Right panel */}
       <div style={{ flex: 1, minWidth: 0 }}>
         {renderRightPanel()}
-        <RunLog runId={selectedAppId} />
+        <RunLog runId={parsedApplyStep?.workflow_run_id ?? selectedAppId} />
       </div>
     </div>
   );

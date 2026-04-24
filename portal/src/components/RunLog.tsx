@@ -82,24 +82,30 @@ function EventRow({
   );
 }
 
+declare const __BACKEND_URL__: string;
+const SSE_URL = `${__BACKEND_URL__}/api/events/stream`;
+
 export default function RunLog({ runId }: { runId: string | null | undefined }) {
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [open, setOpen] = useState(false);
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [connected, setConnected] = useState(false);
+  const [allCount, setAllCount] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!runId) return;
     setEvents([]);
     setExpanded(new Set());
+    setAllCount(0);
 
-    const es = new EventSource("/api/events/stream");
+    const es = new EventSource(SSE_URL);
     es.onopen = () => setConnected(true);
     es.onmessage = (e) => {
       try {
         const ev = JSON.parse(e.data as string) as LogEvent;
         if (ev.type === "ping") return;
+        setAllCount((n) => n + 1);
         if (ev.run_id !== runId) return;
         setEvents((prev) => [...prev, ev]);
       } catch {
@@ -138,10 +144,13 @@ export default function RunLog({ runId }: { runId: string | null | undefined }) 
       >
         <span className="flex items-center gap-2">
           Agent Log
-          <span className="text-xs font-normal text-slate-400 dark:text-slate-500">{events.length} events</span>
+          <span className="text-xs font-normal text-slate-400 dark:text-slate-500">
+            {events.length} events
+            {allCount > events.length && <span className="ml-1 text-amber-400" title="Events received on stream but filtered (different run_id)">({allCount} total)</span>}
+          </span>
           <span
             className={`inline-block w-1.5 h-1.5 rounded-full ${connected ? "bg-green-500" : "bg-slate-300 dark:bg-slate-600"}`}
-            title={connected ? "Connected" : "Connecting…"}
+            title={connected ? `Connected — ${SSE_URL}` : "Connecting…"}
           />
         </span>
         <span className="text-slate-400">{open ? "▲" : "▼"}</span>
