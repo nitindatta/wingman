@@ -162,7 +162,7 @@ async def propose_external_apply_actions(
         return actions
     except Exception as exc:  # pragma: no cover - network/runtime dependent
         log.warning("[propose_external_apply_actions] falling back: %s", exc)
-        return [fallback_proposed_action(observation, profile_facts or {}, approved_memory or [])]
+        return fallback_proposed_actions(observation, profile_facts or {}, approved_memory or [])
 
 
 def build_external_apply_planner_messages(
@@ -179,8 +179,12 @@ def build_external_apply_planner_messages(
         "Prefer safe, reversible actions using approved profile or memory facts. "
         "Do not fill job-search, keyword, classification, or location search fields; those are not application answers. "
         "For contact fields such as email, phone, name, or LinkedIn, only use exact values present in profile_facts. "
+        "For external account creation/login fields such as email and password, use exact values from "
+        "profile_facts.external_accounts.default when present. "
         "For resume/CV file inputs, use profile_facts.resume_path when it is present. "
         "Standard required privacy/data-handling consent checkboxes may be checked automatically. "
+        "If the page mentions a required field or checkbox in an error message but no matching observed element_id exists, "
+        "use ask_user instead of stop_failed so the workflow can pause for help. "
         "If the page asks for salary, visa/work-rights ambiguity, diversity, legal declarations, "
         "background checks, captcha, or anything uncertain, use ask_user. "
         "Never submit the final application; use stop_ready_to_submit when a final submit/apply button is reached. "
@@ -215,14 +219,18 @@ def build_external_apply_batch_planner_messages(
         "For profile/contact pages, include every safe fill/select/check action that can be answered from "
         "approved profile_facts or approved_memory so the harness can fill the page in one pass. "
         "Skip fields that already have a useful current_value. "
-        "If a later field needs user judgement or missing private data, include safe earlier fill actions first, "
-        "then include one ask_user action for that field and stop the plan there. "
+        "If any fields on the current page need user judgement or missing private data, include safe earlier fill actions first, "
+        "then include one ask_user action for each uncertain field on that same page and stop the plan there. "
         "Do not include a navigation click after fill actions; the harness will pause and re-observe after filling. "
         "Only propose a click when there are no safe field actions left on the current page. "
         "Do not fill job-search, keyword, classification, or location search fields; those are not application answers. "
         "For contact fields such as email, phone, name, or LinkedIn, only use exact values present in profile_facts. "
+        "For external account creation/login fields such as email and password, use exact values from "
+        "profile_facts.external_accounts.default when present. "
         "For resume/CV file inputs, use profile_facts.resume_path when it is present. "
         "Standard required privacy/data-handling consent checkboxes may be checked automatically. "
+        "If the page mentions a required field or checkbox in an error message but no matching observed element_id exists, "
+        "use ask_user instead of stop_failed so the workflow can pause for help. "
         "If the page asks for salary, visa/work-rights ambiguity, diversity, legal declarations, "
         "background checks, captcha, or anything uncertain, use ask_user. "
         "Never submit the final application; use stop_ready_to_submit when a final submit/apply button is reached. "
@@ -405,6 +413,61 @@ def fallback_proposed_action(
     )
 
 
+def fallback_proposed_actions(
+    observation: PageObservation,
+    profile_facts: dict[str, Any],
+    approved_memory: list[dict[str, Any]],
+) -> list[ProposedAction]:
+    if observation.page_type in {"captcha", "confirmation"} or _looks_like_job_search_page(observation):
+        return [fallback_proposed_action(observation, profile_facts, approved_memory)]
+
+    safe_actions: list[ProposedAction] = []
+    user_questions: list[ProposedAction] = []
+
+    for field in observation.fields:
+        if field.disabled or field.current_value:
+            continue
+        label = field.label.lower()
+        if _is_sensitive(label):
+            user_questions.append(
+                ProposedAction(
+                    action_type="ask_user",
+                    element_id=field.element_id,
+                    question=f"How should I answer: {field.label}?",
+                    confidence=0.9,
+                    risk="medium",
+                    reason="This field may require user judgement or confirmation.",
+                    source="page",
+                )
+            )
+            continue
+
+        value, source = _lookup_safe_value(field.label, field.field_type, profile_facts, approved_memory)
+        if value:
+            safe_actions.append(_action_for_field(field.element_id, field.field_type, value, source))
+            continue
+
+        if field.required:
+            user_questions.append(
+                ProposedAction(
+                    action_type="ask_user",
+                    element_id=field.element_id,
+                    question=f"How should I answer: {field.label}?",
+                    confidence=0.82,
+                    risk="medium",
+                    reason="No approved exact answer is available for this required field.",
+                    source="page",
+                )
+            )
+
+    if user_questions:
+        return [*safe_actions, *user_questions[:8]]
+    if safe_actions:
+        return safe_actions
+
+    return [fallback_proposed_action(observation, profile_facts, approved_memory)]
+
+
 def _observation_for_prompt(observation: PageObservation) -> dict[str, Any]:
     return {
         "url": observation.url,
@@ -498,6 +561,18 @@ def _lookup_safe_value(
     if "address line two" in label_lower or "address line 2" in label_lower:
         return None, "none"
 
+    if re.search(r"\b(pass(word|code|phrase)?)\b", label_lower):
+        value = _first_profile_value(
+            profile_facts,
+            [
+                "password",
+                "external_accounts.default.password",
+                "default.password",
+            ],
+        )
+        if value:
+            return str(value), "profile"
+
     mappings = [
         (("first name",), "first_name"),
         (("last name",), "last_name"),
@@ -515,7 +590,7 @@ def _lookup_safe_value(
     ]
     for keys, profile_key in mappings:
         if any(key in label_lower for key in keys):
-            value = _profile_path_value(profile_facts, profile_key)
+            value = _first_profile_value(profile_facts, _profile_lookup_paths(profile_key))
             if value:
                 return str(value), "profile"
 
@@ -535,6 +610,36 @@ def _profile_path_value(profile_facts: dict[str, Any], path: str) -> Any:
             return None
         current = current.get(part)
     return current
+
+
+def _first_profile_value(profile_facts: dict[str, Any], paths: list[str]) -> Any:
+    for path in paths:
+        value = _profile_path_value(profile_facts, path)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _profile_lookup_paths(profile_key: str) -> list[str]:
+    mapping: dict[str, list[str]] = {
+        "email": ["email", "contact.email", "external_accounts.default.email", "default.email"],
+        "phone": ["phone", "contact.phone"],
+        "linkedin_url": ["linkedin_url", "contact.linkedin", "contact.linkedin_url"],
+        "name": ["name", "full_name"],
+        "first_name": ["first_name"],
+        "last_name": ["last_name"],
+        "address.street": ["address.street", "address.formatted"],
+        "address.suburb": ["address.suburb", "city", "location"],
+        "address.postcode": ["address.postcode"],
+        "address.state_code": ["address.state_code", "address.state"],
+        "address.country": ["address.country"],
+        "city": ["city", "address.suburb", "location"],
+        "location": ["location", "city", "address.suburb"],
+    }
+    return mapping.get(profile_key, [profile_key])
 
 
 def _action_for_field(

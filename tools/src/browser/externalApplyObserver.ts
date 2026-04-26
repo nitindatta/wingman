@@ -66,11 +66,42 @@ export function collectExternalApplyObservation(): PageObservation {
   const cleanText = (value: string | null | undefined, max = 600): string =>
     (value ?? '').replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 
+  const labelledByText = (el: Element): string => {
+    const ids = (el.getAttribute('aria-labelledby') ?? '')
+      .split(/\s+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return cleanText(
+      ids
+        .map((id) => document.getElementById(id)?.textContent ?? '')
+        .filter(Boolean)
+        .join(' '),
+      240,
+    );
+  };
+
   const isVisible = (el: Element): boolean => {
     if (!(el instanceof window.HTMLElement)) return false;
     if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
     const style = window.getComputedStyle(el);
     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  };
+
+  const hasVisibleAssociatedLabel = (input: HTMLInputElement): boolean => {
+    const labels = Array.from(document.querySelectorAll('label'));
+    const explicit = input.id ? labels.find((label) => label.htmlFor === input.id) : null;
+    const wrapping = input.closest('label');
+    const fieldsetLegend = input.closest('fieldset')?.querySelector('legend');
+    const containerLabel = nearestContainer(input).querySelector('label, [class*="label"], [class*="title"], [class*="heading"]');
+    return [explicit, wrapping, fieldsetLegend, containerLabel].some((candidate) => candidate != null && isVisible(candidate));
+  };
+
+  const isObservableInput = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean => {
+    if (isVisible(input)) return true;
+    if (!(input instanceof window.HTMLInputElement)) return false;
+    const type = input.type?.toLowerCase() || 'text';
+    if (!['checkbox', 'radio'].includes(type)) return false;
+    return hasVisibleAssociatedLabel(input);
   };
 
   const assignElementId = (el: Element, prefix: string): string => {
@@ -107,9 +138,35 @@ export function collectExternalApplyObservation(): PageObservation {
     );
   };
 
+  const labelForElement = (el: Element): string =>
+    cleanText(
+      labelledByText(el)
+      || el.getAttribute('aria-label')
+      || el.closest('label')?.textContent
+      || el.closest('fieldset')?.querySelector('legend')?.textContent
+      || nearestContainer(el).querySelector('label, [class*="label"], [class*="title"], [class*="heading"]')?.textContent
+      || textNear(el, 240),
+      240,
+    );
+
+  const optionLabelForElement = (el: Element): string =>
+    cleanText(
+      labelledByText(el)
+      || el.getAttribute('aria-label')
+      || el.textContent
+      || (el as HTMLInputElement).value
+      || '',
+      160,
+    );
+
   const requiredFor = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean => {
     const nearby = textNear(input, 180).toLowerCase();
     return input.required || input.getAttribute('aria-required') === 'true' || nearby.includes('required') || /\*\s*$/.test(labelForInput(input));
+  };
+
+  const requiredForElement = (el: Element): boolean => {
+    const nearby = textNear(el, 180).toLowerCase();
+    return el.getAttribute('aria-required') === 'true' || nearby.includes('required') || /\*\s*$/.test(labelForElement(el));
   };
 
   const fieldTypeFor = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string => {
@@ -135,7 +192,7 @@ export function collectExternalApplyObservation(): PageObservation {
   ));
 
   for (const input of inputs) {
-    if (!isVisible(input)) continue;
+    if (!isObservableInput(input)) continue;
     const type = fieldTypeFor(input);
 
     if (type === 'radio') {
@@ -183,6 +240,77 @@ export function collectExternalApplyObservation(): PageObservation {
     });
   }
 
+  const customCheckboxes = Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+  for (const checkbox of customCheckboxes) {
+    if (!isVisible(checkbox)) continue;
+    if (fields.some((field) => field.element_id === checkbox.getAttribute('data-envoy-apply-id'))) continue;
+    const ariaChecked = (checkbox.getAttribute('aria-checked') ?? '').toLowerCase();
+    const dataState = (checkbox.getAttribute('data-state') ?? '').toLowerCase();
+    fields.push({
+      element_id: assignElementId(checkbox, 'field'),
+      label: labelForElement(checkbox),
+      field_type: 'checkbox',
+      required: requiredForElement(checkbox),
+      current_value: ariaChecked === 'true' || dataState === 'checked' ? 'checked' : null,
+      options: [],
+      nearby_text: textNear(checkbox),
+      disabled: checkbox.getAttribute('aria-disabled') === 'true' || checkbox.hasAttribute('disabled'),
+      visible: true,
+    });
+  }
+
+  const customRadioGroups = Array.from(document.querySelectorAll<HTMLElement>('[role="radiogroup"]'));
+  for (const group of customRadioGroups) {
+    if (!isVisible(group)) continue;
+    if (group.querySelector('input[type="radio"]')) continue;
+    const radios = Array.from(group.querySelectorAll<HTMLElement>('[role="radio"]')).filter(isVisible);
+    if (!radios.length) continue;
+    const checked = radios.find((radio) => (radio.getAttribute('aria-checked') ?? '').toLowerCase() === 'true');
+    fields.push({
+      element_id: assignElementId(group, 'field'),
+      label: labelForElement(group),
+      field_type: 'radio',
+      required: requiredForElement(group),
+      current_value: checked ? optionLabelForElement(checked) : null,
+      options: radios.map(optionLabelForElement).filter(Boolean),
+      nearby_text: textNear(group),
+      disabled: radios.every((radio) => radio.getAttribute('aria-disabled') === 'true' || radio.hasAttribute('disabled')),
+      visible: true,
+    });
+  }
+
+  const customComboboxes = Array.from(document.querySelectorAll<HTMLElement>('[role="combobox"]'));
+  for (const combobox of customComboboxes) {
+    if (!isVisible(combobox)) continue;
+    const existingId = combobox.getAttribute('data-envoy-apply-id');
+    if (existingId && fields.some((field) => field.element_id === existingId)) continue;
+    const listboxId = combobox.getAttribute('aria-controls') || combobox.getAttribute('aria-owns') || '';
+    const listbox = listboxId ? document.getElementById(listboxId) : null;
+    const options = listbox
+      ? Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"], li, [data-value]'))
+        .map(optionLabelForElement)
+        .filter(Boolean)
+      : [];
+    const currentValue = cleanText(
+      combobox.getAttribute('aria-valuetext')
+      || combobox.getAttribute('aria-label')
+      || combobox.textContent
+      || '',
+      160,
+    );
+    fields.push({
+      element_id: assignElementId(combobox, 'field'),
+      label: labelForElement(combobox),
+      field_type: 'select',
+      required: requiredForElement(combobox),
+      current_value: currentValue || null,
+      options,
+      nearby_text: textNear(combobox),
+      disabled: combobox.getAttribute('aria-disabled') === 'true' || combobox.hasAttribute('disabled'),
+      visible: true,
+    });
+  }
+
   const actionLabel = (el: HTMLElement): string => {
     const candidates = [
       el.textContent,
@@ -193,6 +321,21 @@ export function collectExternalApplyObservation(): PageObservation {
     return cleanText(candidates.find((candidate) => cleanText(candidate, 180)) ?? '', 180);
   };
 
+  const isUtilityNavigationAction = (el: HTMLElement, label: string): boolean => {
+    const combined = cleanText(
+      [
+        label,
+        el.getAttribute('aria-label'),
+        el.getAttribute('title'),
+        el.getAttribute('id'),
+        el.getAttribute('data-automation-id'),
+        el instanceof window.HTMLAnchorElement ? el.getAttribute('href') : '',
+      ].filter(Boolean).join(' '),
+      240,
+    ).toLowerCase();
+    return /\b(skip to main content|skip navigation|accessibilityskiptomaincontent|close jump menu|jump menu)\b/.test(combined);
+  };
+
   const buttons: ObservedAction[] = [];
   const buttonElements = Array.from(document.querySelectorAll<HTMLElement>(
     'button, input[type="submit"], input[type="button"], [role="button"]',
@@ -201,6 +344,7 @@ export function collectExternalApplyObservation(): PageObservation {
     if (!isVisible(button)) continue;
     const label = actionLabel(button);
     if (!label) continue;
+    if (isUtilityNavigationAction(button, label)) continue;
     const inputType = button instanceof window.HTMLInputElement ? button.type.toLowerCase() : '';
     const kind = inputType === 'submit' || (button instanceof window.HTMLButtonElement && button.type === 'submit') ? 'submit' : 'button';
     buttons.push({
@@ -218,6 +362,7 @@ export function collectExternalApplyObservation(): PageObservation {
     if (!isVisible(link)) continue;
     const label = cleanText(link.textContent ?? link.getAttribute('aria-label') ?? link.href, 180);
     if (!label) continue;
+    if (isUtilityNavigationAction(link, label)) continue;
     links.push({
       element_id: assignElementId(link, 'link'),
       label,
@@ -243,10 +388,23 @@ export function collectExternalApplyObservation(): PageObservation {
   const visibleText = cleanText(document.body?.innerText ?? document.body?.textContent, 6000);
   const uploads = fields.filter((field) => field.field_type === 'file');
   const lowerText = visibleText.toLowerCase();
+  const hasLoginFields = fields.some((field) => field.field_type === 'password' || /email|password/i.test(field.label));
+  const hasCaptchaSignals = Boolean(
+    document.querySelector(
+      [
+        'iframe[src*="recaptcha"]',
+        'iframe[src*="hcaptcha"]',
+        '[data-sitekey]',
+        'textarea[name="g-recaptcha-response"]',
+        'textarea[name="h-captcha-response"]',
+        '[title*="captcha" i]',
+      ].join(', '),
+    ),
+  ) || /\bi am not a robot\b|\bi'm not a robot\b|\bverify you are human\b|\bhuman verification\b|\bsecurity check\b/.test(lowerText);
   const page_type =
-    /captcha|robot|recaptcha/.test(lowerText) ? 'captcha'
+    /sign in|log in|login/.test(lowerText) && hasLoginFields ? 'login'
+    : hasCaptchaSignals && !hasLoginFields ? 'captcha'
     : /application (submitted|received|successful|complete)|thank you for applying/.test(lowerText) ? 'confirmation'
-    : /sign in|log in|login/.test(lowerText) && fields.some((field) => /email|password/i.test(field.label)) ? 'login'
     : uploads.length > 0 ? 'resume_upload'
     : /review|summary|confirm/.test(lowerText) && buttons.some((button) => /submit|apply/i.test(button.label)) ? 'review'
     : fields.length > 0 ? 'form'

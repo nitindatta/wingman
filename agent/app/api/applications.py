@@ -194,6 +194,7 @@ async def enqueue_apply(app_id: str, request: Request):
     """Enqueue an apply workflow run for an approved application."""
     repo: SqliteApplicationRepository = request.app.state.application_repository
     queue_repo = request.app.state.queue_repository
+    run_repo = request.app.state.workflow_run_repository
 
     app = await repo.get(app_id)
     if app is None:
@@ -203,9 +204,12 @@ async def enqueue_apply(app_id: str, request: Request):
     if app.state not in applyable_states:
         raise HTTPException(status_code=409, detail=f"cannot apply from state '{app.state}'")
 
+    # Pre-create workflow_run_id so the portal can subscribe to events before the worker starts
+    workflow_run_id = await run_repo.create(application_id=app_id, workflow_type="apply")
+
     await repo.update_state(app_id, "applying")
-    await queue_repo.enqueue("apply", app_id)
-    return {"application_id": app_id, "state": "applying"}
+    await queue_repo.enqueue("apply", app_id, {"workflow_run_id": workflow_run_id})
+    return {"application_id": app_id, "state": "applying", "workflow_run_id": workflow_run_id}
 
 
 class GateResumeRequest(BaseModel):

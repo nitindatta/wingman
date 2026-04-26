@@ -244,10 +244,19 @@ async def run_prepare(
 
 def _load_profile(settings: Settings) -> dict:
     target_path = settings.resolved_target_profile_path
+    profile: dict[str, Any] = {}
     if target_path.exists():
-        return json.loads(target_path.read_text(encoding="utf-8"))
+        profile = json.loads(target_path.read_text(encoding="utf-8"))
 
-    path = settings.resolved_profile_path
-    if not path.exists():
-        return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    if not profile:
+        path = settings.resolved_profile_path
+        if path.exists():
+            profile = json.loads(path.read_text(encoding="utf-8"))
+
+    external_accounts_path = settings.resolved_external_accounts_path
+    if external_accounts_path.exists():
+        external_accounts = json.loads(external_accounts_path.read_text(encoding="utf-8"))
+        if isinstance(external_accounts, dict):
+            profile["external_accounts"] = external_accounts
+
+    return profile

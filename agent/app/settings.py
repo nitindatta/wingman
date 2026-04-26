@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     resume_path: Path = Field(default=Path("profile/resume.docx"))
     raw_profile_path: Path = Field(default=Path("profile/raw_profile.json"))
     profile_answers_path: Path = Field(default=Path("profile/profile_answers.json"))
+    external_accounts_path: Path = Field(default=Path("profile/external_accounts.json"))
     profile_upload_dir: Path = Field(default=Path("automation/profile_uploads"))
 
     def _discover_profile_path(self, configured_path: Path) -> Path | None:
@@ -66,7 +67,7 @@ class Settings(BaseSettings):
         candidates: list[Path] = []
         for candidate in directory.glob("*.json"):
             name = candidate.name.lower()
-            if name in {"raw_profile.json", "profile_answers.json"}:
+            if name in {"raw_profile.json", "profile_answers.json", "external_accounts.json"}:
                 continue
             if name.endswith(".canonical.json"):
                 continue
@@ -76,6 +77,23 @@ class Settings(BaseSettings):
             return candidates[0]
 
         preferred = [candidate for candidate in candidates if candidate.stem.endswith("_profile")]
+        if len(preferred) == 1:
+            return preferred[0]
+
+        return None
+
+    def _discover_target_profile_path(self, configured_path: Path) -> Path | None:
+        directory = configured_path.parent
+        if not directory.exists():
+            return None
+
+        candidates = sorted(directory.glob("*.canonical.json"), key=lambda candidate: candidate.name.lower())
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0].resolve()
+
+        preferred = [candidate.resolve() for candidate in candidates if candidate.stem.endswith("_profile.canonical")]
         if len(preferred) == 1:
             return preferred[0]
 
@@ -138,11 +156,25 @@ class Settings(BaseSettings):
         return (self.repo_root / self.profile_answers_path).resolve()
 
     @property
+    def resolved_external_accounts_path(self) -> Path:
+        if self.external_accounts_path.is_absolute():
+            return self.external_accounts_path
+        return (self.repo_root / self.external_accounts_path).resolve()
+
+    @property
     def resolved_target_profile_path(self) -> Path:
         source = self.resolved_profile_path
-        if source.suffix:
-            return source.with_name(f"{source.stem}.canonical{source.suffix}")
-        return source.with_name(f"{source.name}.canonical.json")
+        configured = (
+            source.with_name(f"{source.stem}.canonical{source.suffix}")
+            if source.suffix
+            else source.with_name(f"{source.name}.canonical.json")
+        )
+        discovered = self._discover_target_profile_path(configured)
+        if not source.exists() and discovered is not None:
+            return discovered
+        if configured.exists():
+            return configured
+        return discovered or configured
 
 
 _settings: Settings | None = None

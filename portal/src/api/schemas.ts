@@ -215,6 +215,7 @@ export const externalUserQuestionSchema = z.object({
   context: z.string().optional().default(""),
   suggested_answers: z.array(z.string()).optional().default([]),
   target_element_id: z.string().nullable().optional(),
+  question_key: z.string().nullable().optional(),
 });
 
 export const externalApplyStateSchema = z.object({
@@ -226,6 +227,7 @@ export const externalApplyStateSchema = z.object({
   last_action_result: externalActionResultSchema.nullable().optional(),
   completed_actions: z.array(externalActionTraceSchema).optional().default([]),
   pending_user_question: externalUserQuestionSchema.nullable().optional(),
+  pending_user_questions: z.array(externalUserQuestionSchema).optional().default([]),
   risk_flags: z.array(z.string()).optional().default([]),
   submit_ready: z.boolean().optional().default(false),
   status: z.string().optional().default("running"),

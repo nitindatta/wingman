@@ -95,6 +95,10 @@ def validate_external_apply_action(
         target_field is not None
         and is_standard_privacy_consent_field(observation, target_field)
     )
+    configured_consent_default = (
+        target_field is not None
+        and should_default_check_consent_field(observation, target_field, profile_facts or {})
+    )
 
     if proposed_action.confidence < 0.75:
         return PolicyDecision(
@@ -112,8 +116,15 @@ def validate_external_apply_action(
             risk_flags=["high_risk"],
         )
 
+    if action_type == "click" and _looks_like_utility_navigation_action(target_text):
+        return PolicyDecision(
+            decision="rejected",
+            reason="Utility navigation links like skip/jump controls are not valid application actions.",
+            risk_flags=["utility_navigation"],
+        )
+
     sensitive_hits = _sensitive_hits(target_text)
-    if sensitive_hits and not standard_privacy_consent:
+    if sensitive_hits and not standard_privacy_consent and not configured_consent_default:
         return PolicyDecision(
             decision="paused",
             reason="The target appears to ask for sensitive or judgement-based information.",
@@ -129,7 +140,11 @@ def validate_external_apply_action(
                 pause_reason="needs_approval",
                 risk_flags=["not_application_form", "job_search_field"],
             )
-        if target_field and _looks_like_optional_or_judgement_consent(observation, target_field):
+        if (
+            target_field
+            and _looks_like_optional_or_judgement_consent(observation, target_field)
+            and not configured_consent_default
+        ):
             return PolicyDecision(
                 decision="paused",
                 reason="The checkbox appears to opt into an optional or judgement-based consent.",
@@ -207,8 +222,13 @@ def _looks_like_submit(text: str) -> bool:
     return bool(re.search(r"\b(submit|send application|apply now|finish application)\b", text.lower()))
 
 
+def _looks_like_utility_navigation_action(text: str) -> bool:
+    lowered = text.lower()
+    return bool(re.search(r"\b(skip to main content|skip navigation|close jump menu|jump menu)\b", lowered))
+
+
 def is_standard_privacy_consent_field(observation: PageObservation, field: ObservedField) -> bool:
-    """Return True for required application privacy/data-processing consent.
+    """Return True for required application consent that is safe to default-check.
 
     This intentionally excludes optional marketing, talent-pool, legal,
     background-check, diversity, and work-rights style declarations.
@@ -234,11 +254,27 @@ def is_standard_privacy_consent_field(observation: PageObservation, field: Obser
         r"\b(privacy|personal data|data protection|processing|store|stored|transferred|pageup)\b",
         text,
     )
-    has_consent_language = re.search(
-        r"\b(consent|agree|acknowledge|accept|authorise|authorize|understand)\b",
+    has_terms_subject = re.search(
+        r"\b(terms and conditions|terms & conditions|terms of use|terms of service|application terms|create account|account creation|candidate account)\b",
         text,
     )
-    return bool(has_privacy_subject and has_consent_language)
+    has_general_consent_subject = re.search(
+        r"\b(consent|agreement|agree|agrees|acknowledge|accept|accepted|authorise|authorize|permission|confirm|opt in)\b",
+        text,
+    )
+    return bool(has_general_consent_subject and (has_privacy_subject or has_terms_subject or "required" in text or "*" in field.label))
+
+
+def should_default_check_consent_field(
+    observation: PageObservation,
+    field: ObservedField,
+    profile_facts: dict[str, Any],
+) -> bool:
+    if is_standard_privacy_consent_field(observation, field):
+        return True
+    if not consent_checkboxes_always_true(profile_facts):
+        return False
+    return _looks_like_any_consent_field(observation, field)
 
 
 def _looks_like_optional_or_judgement_consent(observation: PageObservation, field: ObservedField) -> bool:
@@ -251,6 +287,34 @@ def _looks_like_optional_or_judgement_consent(observation: PageObservation, fiel
         r"salary|compensation|visa|sponsor|right to work|work rights)\b",
         text,
     ))
+
+
+def _looks_like_any_consent_field(observation: PageObservation, field: ObservedField) -> bool:
+    if field.field_type != "checkbox":
+        return False
+    text = " ".join([field.label, field.nearby_text, observation.visible_text[:1200]]).lower()
+    return bool(re.search(
+        r"\b(consent|agreement|agree|agrees|acknowledge|accept|accepted|authorise|authorize|permission|"
+        r"confirm|opt in|privacy|terms and conditions|terms & conditions|terms of use|terms of service|"
+        r"marketing|newsletter|job alert|talent pool|future opportunit|promotional)\b",
+        text,
+    ))
+
+
+def consent_checkboxes_always_true(profile_facts: dict[str, Any]) -> bool:
+    return any(
+        _profile_truthy(profile_facts, path)
+        for path in (
+            "external_accounts.always_accept_consents",
+            "external_accounts.auto_approve_consents",
+            "external_accounts.consent_checkboxes",
+            "external_accounts.consent_checkboxes_always_true",
+            "always_accept_consents",
+            "auto_approve_consents",
+            "consent_checkboxes",
+            "consent_checkboxes_always_true",
+        )
+    )
 
 
 def _looks_like_job_search_field(observation: PageObservation, field: ObservedField) -> bool:
@@ -268,7 +332,9 @@ def _looks_like_job_search_field(observation: PageObservation, field: ObservedFi
 def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any]) -> list[str]:
     label = " ".join([field.label, field.field_type, field.nearby_text]).lower()
     if "email" in label or "e-mail" in label:
-        return _profile_values(profile_facts, ["email", "contact.email"])
+        return _profile_values(profile_facts, ["email", "contact.email", "external_accounts.default.email", "default.email"])
+    if re.search(r"\b(pass(word|code|phrase)?)\b", label):
+        return _profile_values(profile_facts, ["password", "external_accounts.default.password", "default.password"])
     if re.search(r"\b(phone|mobile|telephone|tel)\b", label):
         return _profile_values(profile_facts, ["phone", "contact.phone"])
     if "linkedin" in label:
@@ -310,6 +376,19 @@ def _profile_values(profile_facts: dict[str, Any], paths: list[str]) -> list[str
             if text:
                 values.append(text)
     return values
+
+
+def _profile_truthy(profile_facts: dict[str, Any], path: str) -> bool:
+    current: Any = profile_facts
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return False
+        current = current.get(part)
+    if isinstance(current, bool):
+        return current
+    if isinstance(current, str):
+        return current.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(current)
 
 
 def _matches_any_expected_value(value: str, expected_values: list[str]) -> bool:

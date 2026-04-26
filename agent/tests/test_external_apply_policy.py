@@ -26,6 +26,30 @@ def test_policy_allows_safe_profile_backed_fill() -> None:
     assert decision.decision == "allowed"
 
 
+def test_policy_allows_password_fill_from_external_accounts_default() -> None:
+    observation = PageObservation(
+        url="https://ats.example/login",
+        fields=[ObservedField(element_id="field_password", label="Password", field_type="text")],
+    )
+    action = ProposedAction(
+        action_type="fill_text",
+        element_id="field_password",
+        value="Sunshine@123#5",
+        confidence=0.94,
+        risk="low",
+        reason="Password comes from the configured external accounts file.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"external_accounts": {"default": {"password": "Sunshine@123#5"}}},
+    )
+
+    assert decision.decision == "allowed"
+
+
 def test_policy_pauses_job_search_field_even_when_planner_claims_profile_source() -> None:
     observation = PageObservation(
         url="https://hk.jobsdb.com/",
@@ -151,6 +175,35 @@ def test_policy_allows_standard_required_privacy_consent_checkbox() -> None:
     assert decision.decision == "allowed"
 
 
+def test_policy_allows_required_create_account_terms_checkbox() -> None:
+    observation = PageObservation(
+        url="https://company.wd3.myworkdayjobs.com/apply",
+        visible_text="You must agree to the terms and conditions to create your account and continue.",
+        fields=[
+            ObservedField(
+                element_id="field_create_account_terms",
+                label="I agree to create an account and accept the Terms and Conditions",
+                field_type="checkbox",
+                required=True,
+                nearby_text="Required to create your candidate account and continue the application.",
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="set_checkbox",
+        element_id="field_create_account_terms",
+        value="true",
+        confidence=0.98,
+        risk="low",
+        reason="Required account-creation terms consent.",
+        source="user",
+    )
+
+    decision = validate_external_apply_action(observation=observation, proposed_action=action)
+
+    assert decision.decision == "allowed"
+
+
 def test_policy_pauses_optional_marketing_consent_checkbox() -> None:
     observation = PageObservation(
         url="https://ats.example/apply",
@@ -178,6 +231,38 @@ def test_policy_pauses_optional_marketing_consent_checkbox() -> None:
 
     assert decision.decision == "paused"
     assert decision.pause_reason == "needs_approval"
+
+
+def test_policy_allows_optional_marketing_consent_when_configured_always_true() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[
+            ObservedField(
+                element_id="field_marketing",
+                label="I agree to receive marketing and future opportunity emails",
+                field_type="checkbox",
+                required=True,
+                nearby_text="Privacy policy applies.",
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="set_checkbox",
+        element_id="field_marketing",
+        value="true",
+        confidence=0.98,
+        risk="low",
+        reason="Consent checkbox configured to default true.",
+        source="user",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"external_accounts": {"always_accept_consents": True}},
+    )
+
+    assert decision.decision == "allowed"
 
 
 def test_policy_pauses_final_submit_click() -> None:

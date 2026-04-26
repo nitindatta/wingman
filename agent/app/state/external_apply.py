@@ -125,6 +125,7 @@ class UserQuestion(BaseModel):
     context: str = ""
     suggested_answers: list[str] = Field(default_factory=list)
     target_element_id: str | None = None
+    question_key: str | None = None
 
 
 class ExternalApplyState(BaseModel):
@@ -138,6 +139,7 @@ class ExternalApplyState(BaseModel):
 
     completed_actions: list[ActionTrace] = Field(default_factory=list)
     pending_user_question: UserQuestion | None = None
+    pending_user_questions: list[UserQuestion] = Field(default_factory=list)
     risk_flags: list[str] = Field(default_factory=list)
 
     submit_ready: bool = False

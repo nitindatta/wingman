@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
-import { EXTERNAL_USER_ANSWER_KEY, startApply, resumeApply } from "../api/applications";
+import { EXTERNAL_USER_ANSWER_PREFIX, EXTERNAL_USER_QUESTION_PREFIX, startApply, resumeApply } from "../api/applications";
 import type { ApplyStepResponse, FieldInfo } from "../api/schemas";
+import { ExternalUserQuestionsPanel } from "../components/ExternalUserQuestionsPanel";
 import RunLog from "../components/RunLog";
 
 type Phase = "idle" | "starting" | "gate" | "done" | "error";
@@ -73,6 +74,12 @@ export default function ApplyPage() {
   const isExternal = step?.is_external_portal;
   const externalApply = response?.external_apply;
   const pendingExternalQuestion = externalApply?.pending_user_question ?? null;
+  const pendingExternalQuestions =
+    externalApply?.pending_user_questions && externalApply.pending_user_questions.length > 0
+      ? externalApply.pending_user_questions
+      : pendingExternalQuestion
+        ? [pendingExternalQuestion]
+        : [];
   const isAuthRequired = step?.page_type === "auth_required";
   const isConfirmed = response?.status === "completed";
   const isFailed = response?.status === "failed";
@@ -168,7 +175,7 @@ export default function ApplyPage() {
                 </div>
               )}
 
-              {externalApply.pending_user_question && (
+              {pendingExternalQuestions.length === 1 && externalApply.pending_user_question && (
                 <div style={{ fontSize: 13, marginBottom: 6 }}>
                   Question: <strong>{externalApply.pending_user_question.question}</strong>
                   {externalApply.pending_user_question.context && (
@@ -176,11 +183,36 @@ export default function ApplyPage() {
                   )}
                 </div>
               )}
+              {pendingExternalQuestions.length > 1 && (
+                <div style={{ fontSize: 13, marginBottom: 6 }}>
+                  Questions needing your input: <strong>{pendingExternalQuestions.length}</strong>
+                </div>
+              )}
 
               {externalApply.risk_flags.length > 0 && (
                 <div style={{ fontSize: 12 }}>
                   Risk flags: {externalApply.risk_flags.join(", ")}
                 </div>
+              )}
+
+              {pendingExternalQuestions.length > 0 && (
+                <ExternalUserQuestionsPanel
+                  isPending={resumeMutation.isPending}
+                  onSubmit={(answers) =>
+                    resumeMutation.mutate({
+                      actionLabel: "Continue",
+                      approvedValues: Object.fromEntries(
+                        Object.entries(answers).map(([key, answer]) => [
+                          pendingExternalQuestions.some((question) => question.target_element_id === key)
+                            ? `${EXTERNAL_USER_ANSWER_PREFIX}${key}`
+                            : `${EXTERNAL_USER_QUESTION_PREFIX}${key}`,
+                          answer,
+                        ]),
+                      ),
+                    })
+                  }
+                  questions={pendingExternalQuestions}
+                />
               )}
             </div>
           )}
@@ -195,21 +227,7 @@ export default function ApplyPage() {
                 Open Portal ↗
               </a>
             )}
-            {externalApply && !externalApply.submit_ready && pendingExternalQuestion?.target_element_id && (
-              <button
-                onClick={() =>
-                  resumeMutation.mutate({
-                    actionLabel: "Continue",
-                    approvedValues: { [EXTERNAL_USER_ANSWER_KEY]: "true" },
-                  })
-                }
-                disabled={resumeMutation.isPending}
-                style={{ ...btnStyle("#16a34a"), marginRight: 12 }}
-              >
-                {resumeMutation.isPending ? "Continuing..." : "I consent, continue"}
-              </button>
-            )}
-            {externalApply && !externalApply.submit_ready && !pendingExternalQuestion && (
+            {externalApply && !externalApply.submit_ready && pendingExternalQuestions.length === 0 && (
               <button
                 onClick={() => resumeMutation.mutate({ actionLabel: "Continue" })}
                 disabled={resumeMutation.isPending}

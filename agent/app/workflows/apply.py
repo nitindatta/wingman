@@ -33,7 +33,9 @@ from app.persistence.sqlite.workflow_runs import SqliteWorkflowRunRepository, Sq
 from app.services.answer_field import propose_field_values
 from app.services.external_apply_harness import (
     EXTERNAL_USER_ANSWER_KEY,
-    apply_external_user_answer,
+    EXTERNAL_USER_ANSWER_PREFIX,
+    EXTERNAL_USER_QUESTION_PREFIX,
+    apply_external_user_answers,
     run_external_apply_step,
 )
 from app.settings import Settings
@@ -60,6 +62,12 @@ def _load_profile(settings: Settings) -> dict:
     if target_path.exists():
         canonical = json.loads(target_path.read_text(encoding="utf-8"))
         profile = _deep_merge_non_empty(profile, canonical)
+
+    external_accounts_path = settings.resolved_external_accounts_path
+    if external_accounts_path.exists():
+        external_accounts = json.loads(external_accounts_path.read_text(encoding="utf-8"))
+        if isinstance(external_accounts, dict):
+            profile["external_accounts"] = external_accounts
 
     resume_path = settings.resolved_resume_path
     if resume_path is not None:
@@ -522,27 +530,49 @@ def build_apply_graph(
 
     async def node_external_gate(state: ApplyState) -> dict[str, Any]:
         _set_node("external_gate")
+        external_answers = {
+            key[len(EXTERNAL_USER_ANSWER_PREFIX) :]: value
+            for key, value in state.proposed_values.items()
+            if key.startswith(EXTERNAL_USER_ANSWER_PREFIX)
+        }
+        external_question_answers = {
+            key[len(EXTERNAL_USER_QUESTION_PREFIX) :]: value
+            for key, value in state.proposed_values.items()
+            if key.startswith(EXTERNAL_USER_QUESTION_PREFIX)
+        }
+        legacy_external_answer = state.proposed_values.get(EXTERNAL_USER_ANSWER_KEY)
+        if (
+            legacy_external_answer
+            and state.external_apply is not None
+            and state.external_apply.pending_user_question is not None
+            and state.external_apply.pending_user_question.target_element_id
+        ):
+            external_answers.setdefault(
+                state.external_apply.pending_user_question.target_element_id,
+                legacy_external_answer,
+            )
         log.info("[external_gate] resumed: status=%s action=%s", state.status, state.action_label)
         ev("node", f"external_gate: user resumed — action={state.action_label}", {
             "action_label": state.action_label,
             "status": state.status,
-            "has_user_answer": bool(state.proposed_values.get(EXTERNAL_USER_ANSWER_KEY)),
+            "has_user_answer": bool(external_answers or external_question_answers),
         })
         if state.status == "aborted":
             ev("node", "external_gate: aborted by user", {})
             return {}
-        external_answer = state.proposed_values.get(EXTERNAL_USER_ANSWER_KEY)
-        if external_answer and state.external_apply is not None and state.session_key:
-            log.info("[external_gate] applying user answer to external target")
-            ev("node", "external_gate: applying user consent answer to element", {
-                "answer": external_answer,
-                "target_element": state.external_apply.pending_user_question.target_element_id if state.external_apply.pending_user_question else None,
+        if (external_answers or external_question_answers) and state.external_apply is not None and state.session_key:
+            log.info("[external_gate] applying user answers to external targets")
+            ev("node", "external_gate: applying user answers to external elements", {
+                "answers_count": len(external_answers) + len(external_question_answers),
+                "targets": sorted(external_answers.keys()),
+                "question_keys": sorted(external_question_answers.keys()),
             })
-            external_state = await apply_external_user_answer(
+            external_state = await apply_external_user_answers(
                 tool_client,
                 session_key=state.session_key,
                 external_state=state.external_apply,
-                answer=external_answer,
+                answers_by_element_id=external_answers,
+                answers_by_question_key=external_question_answers,
             )
             next_state = state.model_copy(update={"external_apply": external_state})
             status, pause_reason = _status_for_external_harness(next_state)

@@ -194,7 +194,8 @@ async def _handle_apply_or_resume(item: Any, app_state: Any) -> None:
         if item.queue_type == "apply":
             payload = item.payload or {}
             run_repo = app_state.workflow_run_repository
-            run_id = await run_repo.create(application_id=app_id, workflow_type="apply")
+            # Use pre-created run_id from enqueue_apply if available, otherwise create one
+            run_id = payload.get("workflow_run_id") or await run_repo.create(application_id=app_id, workflow_type="apply")
             set_run_id(run_id)
             apply_state = await run_apply(
                 app_state.settings,

@@ -36,6 +36,12 @@ export function truthyFormValue(value: string | null | undefined): boolean {
   return ['1', 'true', 'yes', 'y', 'checked', 'on'].includes((value ?? '').trim().toLowerCase());
 }
 
+type CheckboxTargetState = {
+  nativeCheckbox: boolean;
+  ariaCheckbox: boolean;
+  checked: boolean;
+};
+
 export async function executeExternalApplyAction(
   page: Page,
   action: ExternalApplyAction,
@@ -69,8 +75,7 @@ export async function executeExternalApplyAction(
         await selectAriaComboboxOption(page, action.element_id, action.value);
       }
     } else if (action.action_type === 'set_checkbox') {
-      if (truthyFormValue(action.value)) await target.check();
-      else await target.uncheck();
+      await setCheckboxValue(target, truthyFormValue(action.value));
     } else if (action.action_type === 'set_radio') {
       if (action.value == null) throw new Error('set_radio requires value');
       await clickRadioOption(page, action.element_id, action.value);
@@ -108,6 +113,51 @@ export async function executeExternalApplyAction(
       previousUrl,
     });
   }
+}
+
+async function setCheckboxValue(target: ReturnType<Page['locator']>, desiredChecked: boolean): Promise<void> {
+  const state = await describeCheckboxTarget(target);
+  if (state.nativeCheckbox) {
+    try {
+      if (desiredChecked) await target.check();
+      else await target.uncheck();
+    } catch {
+      await target.evaluate((node, shouldBeChecked) => {
+        const input = node as HTMLInputElement;
+        input.checked = shouldBeChecked;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      }, desiredChecked);
+    }
+    return;
+  }
+  if (state.ariaCheckbox) {
+    if (state.checked !== desiredChecked) {
+      await target.click();
+    }
+    return;
+  }
+  if (desiredChecked) await target.check();
+  else await target.uncheck();
+}
+
+async function describeCheckboxTarget(target: ReturnType<Page['locator']>): Promise<CheckboxTargetState> {
+  return target.evaluate((node) => {
+    const el = node as HTMLElement;
+    const input = node as HTMLInputElement;
+    const tag = el.tagName?.toLowerCase() ?? '';
+    const type = input.type?.toLowerCase() ?? '';
+    const role = (el.getAttribute('role') ?? '').toLowerCase();
+    const ariaChecked = (el.getAttribute('aria-checked') ?? '').toLowerCase();
+    const dataState = (el.getAttribute('data-state') ?? '').toLowerCase();
+    return {
+      nativeCheckbox: tag === 'input' && type === 'checkbox',
+      ariaCheckbox: role === 'checkbox',
+      checked: (tag === 'input' && type === 'checkbox' && input.checked)
+        || ariaChecked === 'true'
+        || dataState === 'checked',
+    };
+  });
 }
 
 function escapeCssIdent(ident: string): string {
@@ -184,22 +234,65 @@ async function selectAriaComboboxOption(page: Page, elementId: string, value: st
 async function clickRadioOption(page: Page, elementId: string, value: string): Promise<void> {
   const radios = page.locator(`${elementIdSelector(elementId)} input[type="radio"]`);
   const count = await radios.count();
-  if (!count) {
-    await page.locator(elementIdSelector(elementId)).first().check();
+  if (count) {
+    const candidates = radioValueCandidates(value);
+    const entries: { radio: ReturnType<typeof radios.nth>; label: string; inputValue: string }[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const radio = radios.nth(index);
+      const { label, inputValue } = await radio.evaluate((node) => {
+        const input = node as HTMLInputElement;
+        const explicit = input.id ? document.querySelector(`label[for="${input.id}"]`) : null;
+        const wrapping = input.closest('label');
+        return {
+          label: (explicit?.textContent ?? wrapping?.textContent ?? '').trim(),
+          inputValue: (input.value ?? '').trim(),
+        };
+      });
+      entries.push({ radio, label, inputValue });
+    }
+
+    for (const candidate of candidates) {
+      for (const entry of entries) {
+        const labelLower = entry.label.toLowerCase();
+        const valueLower = entry.inputValue.toLowerCase();
+        if (labelLower === candidate || valueLower === candidate) {
+          await entry.radio.click();
+          return;
+        }
+      }
+    }
+
+    for (const candidate of candidates) {
+      for (const entry of entries) {
+        if (entry.label.toLowerCase().includes(candidate)) {
+          await entry.radio.click();
+          return;
+        }
+      }
+    }
+
+    const available = entries.map((entry) => entry.label || entry.inputValue).filter(Boolean).join(', ');
+    throw new Error(`No radio option matching "${value}"${available ? ` (options: ${available})` : ''}`);
+  }
+
+  const roleRadios = page.locator(`${elementIdSelector(elementId)} [role="radio"]`);
+  const roleCount = await roleRadios.count();
+  if (!roleCount) {
+    await page.locator(elementIdSelector(elementId)).first().click();
     return;
   }
 
   const candidates = radioValueCandidates(value);
-  const entries: { radio: ReturnType<typeof radios.nth>; label: string; inputValue: string }[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const radio = radios.nth(index);
+  const entries: { radio: ReturnType<typeof roleRadios.nth>; label: string; inputValue: string }[] = [];
+  for (let index = 0; index < roleCount; index += 1) {
+    const radio = roleRadios.nth(index);
     const { label, inputValue } = await radio.evaluate((node) => {
-      const input = node as HTMLInputElement;
-      const explicit = input.id ? document.querySelector(`label[for="${input.id}"]`) : null;
-      const wrapping = input.closest('label');
+      const el = node as HTMLElement;
+      const ids = (el.getAttribute('aria-labelledby') ?? '').split(/\s+/).filter(Boolean);
+      const labelledBy = ids.map((id) => document.getElementById(id)?.textContent ?? '').join(' ').trim();
       return {
-        label: (explicit?.textContent ?? wrapping?.textContent ?? '').trim(),
-        inputValue: (input.value ?? '').trim(),
+        label: (el.getAttribute('aria-label') ?? labelledBy ?? el.textContent ?? '').trim(),
+        inputValue: (el.getAttribute('data-value') ?? el.getAttribute('value') ?? '').trim(),
       };
     });
     entries.push({ radio, label, inputValue });

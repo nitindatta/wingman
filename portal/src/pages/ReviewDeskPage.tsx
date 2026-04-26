@@ -1,12 +1,14 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import RunLog from "../components/RunLog";
+import { ExternalUserQuestionsPanel } from "../components/ExternalUserQuestionsPanel";
 import {
+  EXTERNAL_USER_ANSWER_PREFIX,
+  EXTERNAL_USER_QUESTION_PREFIX,
   fetchApplications,
   fetchApplicationDetail,
   approveApplication,
   discardApplication,
-  EXTERNAL_USER_ANSWER_KEY,
   enqueueApply,
   enqueueExternalHarness,
   enqueueGate,
@@ -784,6 +786,7 @@ export default function ReviewDeskPage() {
   const [coverLetterText, setCoverLetterText] = useState<string>("");
   const [gateAnswers, setGateAnswers] = useState<Record<string, string>>({});
   const [showEvidence, setShowEvidence] = useState(true);
+  const [pendingRunId, setPendingRunId] = useState<string | null>(null);
 
   // Spin keyframe injected once
   useEffect(() => {
@@ -880,7 +883,8 @@ export default function ReviewDeskPage() {
 
   const applyMutation = useMutation({
     mutationFn: (appId: string) => enqueueApply(appId),
-    onSuccess: () => {
+    onSuccess: (data) => {
+      setPendingRunId(data.workflow_run_id);
       queryClient.invalidateQueries({ queryKey: ["applications"] });
       queryClient.invalidateQueries({ queryKey: ["applicationDetail", selectedAppId] });
     },
@@ -1250,6 +1254,12 @@ export default function ReviewDeskPage() {
         const portalType = parsedApplyStep?.step?.portal_type;
         const externalApply = parsedApplyStep?.external_apply ?? null;
         const pendingExternalQuestion = externalApply?.pending_user_question ?? null;
+        const pendingExternalQuestions =
+          externalApply?.pending_user_questions && externalApply.pending_user_questions.length > 0
+            ? externalApply.pending_user_questions
+            : pendingExternalQuestion
+              ? [pendingExternalQuestion]
+              : [];
         const runId = parsedApplyStep?.workflow_run_id;
         const pauseReason = parsedApplyStep?.pause_reason;
         const startTargetUrl = detail.application.target_application_url ?? pageUrl;
@@ -1293,7 +1303,7 @@ export default function ReviewDeskPage() {
                       <div style={{ marginTop: 4 }}>{externalApply.proposed_action.reason}</div>
                     </div>
                   )}
-                  {externalApply.pending_user_question && (
+                  {pendingExternalQuestions.length === 1 && externalApply.pending_user_question && (
                     <div style={{ fontSize: 13, marginBottom: 6 }}>
                       Question: <strong>{externalApply.pending_user_question.question}</strong>
                       {externalApply.pending_user_question.context && (
@@ -1301,10 +1311,35 @@ export default function ReviewDeskPage() {
                       )}
                     </div>
                   )}
+                  {pendingExternalQuestions.length > 1 && (
+                    <div style={{ fontSize: 13, marginBottom: 6 }}>
+                      Questions needing your input: <strong>{pendingExternalQuestions.length}</strong>
+                    </div>
+                  )}
                   {externalApply.risk_flags.length > 0 && (
                     <div style={{ fontSize: 12 }}>
                       Risk flags: {externalApply.risk_flags.join(", ")}
                     </div>
+                  )}
+                  {runId && pendingExternalQuestions.length > 0 && (
+                    <ExternalUserQuestionsPanel
+                      isPending={gateMutation.isPending}
+                      onSubmit={(answers) =>
+                        gateMutation.mutate({
+                          appId,
+                          runId,
+                          values: Object.fromEntries(
+                            Object.entries(answers).map(([key, answer]) => [
+                              pendingExternalQuestions.some((question) => question.target_element_id === key)
+                                ? `${EXTERNAL_USER_ANSWER_PREFIX}${key}`
+                                : `${EXTERNAL_USER_QUESTION_PREFIX}${key}`,
+                              answer,
+                            ]),
+                          ),
+                        })
+                      }
+                      questions={pendingExternalQuestions}
+                    />
                   )}
                 </div>
               )}
@@ -1314,22 +1349,7 @@ export default function ReviewDeskPage() {
                 </a>
               )}
               <div style={{ display: "flex", gap: "0.75rem" }}>
-                {externalApply && !externalApply.submit_ready && runId && pendingExternalQuestion?.target_element_id && (
-                  <button
-                    onClick={() =>
-                      gateMutation.mutate({
-                        appId,
-                        runId,
-                        values: { [EXTERNAL_USER_ANSWER_KEY]: "true" },
-                      })
-                    }
-                    disabled={gateMutation.isPending}
-                    style={{ padding: "0.5rem 1.25rem", background: "#16a34a", color: "#fff", border: "none", borderRadius: 6, cursor: gateMutation.isPending ? "not-allowed" : "pointer", fontSize: 14, fontWeight: 600 }}
-                  >
-                    {gateMutation.isPending ? "Continuing..." : "I consent, continue"}
-                  </button>
-                )}
-                {externalApply && !externalApply.submit_ready && runId && !pendingExternalQuestion && (
+                {externalApply && !externalApply.submit_ready && runId && pendingExternalQuestions.length === 0 && (
                   <button
                     onClick={() => gateMutation.mutate({ appId, runId, values: {} })}
                     disabled={gateMutation.isPending}
@@ -1618,7 +1638,7 @@ export default function ReviewDeskPage() {
             key={app.id}
             app={app}
             selected={app.id === selectedAppId}
-            onClick={() => setSelectedAppId(app.id)}
+            onClick={() => { setSelectedAppId(app.id); setPendingRunId(null); }}
           />
         ))}
       </div>
@@ -1626,7 +1646,7 @@ export default function ReviewDeskPage() {
       {/* Right panel */}
       <div style={{ flex: 1, minWidth: 0 }}>
         {renderRightPanel()}
-        <RunLog runId={parsedApplyStep?.workflow_run_id ?? selectedAppId} />
+        <RunLog runId={parsedApplyStep?.workflow_run_id ?? pendingRunId ?? selectedAppId} />
       </div>
     </div>
   );

@@ -74,6 +74,42 @@ def test_fallback_fills_safe_profile_field() -> None:
     assert action.source == "profile"
 
 
+def test_fallback_fills_email_from_external_accounts_default() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_1", label="Email address", field_type="email")],
+    )
+
+    action = fallback_proposed_action(
+        observation,
+        {"external_accounts": {"default": {"email": "nitin@example.com"}}},
+        [],
+    )
+
+    assert action.action_type == "fill_text"
+    assert action.element_id == "field_1"
+    assert action.value == "nitin@example.com"
+    assert action.source == "profile"
+
+
+def test_fallback_fills_password_from_external_accounts_default() -> None:
+    observation = PageObservation(
+        url="https://ats.example/login",
+        fields=[ObservedField(element_id="field_password", label="Password", field_type="text")],
+    )
+
+    action = fallback_proposed_action(
+        observation,
+        {"external_accounts": {"default": {"password": "Sunshine@123#5"}}},
+        [],
+    )
+
+    assert action.action_type == "fill_text"
+    assert action.element_id == "field_password"
+    assert action.value == "Sunshine@123#5"
+    assert action.source == "profile"
+
+
 def test_fallback_fills_home_address_from_canonical_profile() -> None:
     observation = PageObservation(
         url="https://ats.example/apply",

@@ -12,6 +12,8 @@ import {
 import { z } from "zod";
 
 export const EXTERNAL_USER_ANSWER_KEY = "__external_apply_user_answer";
+export const EXTERNAL_USER_ANSWER_PREFIX = "__external_apply_user_answer__";
+export const EXTERNAL_USER_QUESTION_PREFIX = "__external_apply_user_question__";
 
 export async function fetchApplications(params?: { state?: string }): Promise<Application[]> {
   const url = params?.state ? `/applications?state=${params.state}` : "/applications";
@@ -25,8 +27,8 @@ export async function fetchApplicationDetail(appId: string): Promise<Application
   return applicationDetailSchema.parse(raw);
 }
 
-export async function enqueueApply(appId: string): Promise<void> {
-  await apiFetch<unknown>(`/applications/${appId}/apply`, {
+export async function enqueueApply(appId: string): Promise<{ workflow_run_id: string }> {
+  return apiFetch<{ workflow_run_id: string }>(`/applications/${appId}/apply`, {
     method: "POST",
     body: JSON.stringify({}),
   });

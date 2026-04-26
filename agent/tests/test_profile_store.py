@@ -67,6 +67,44 @@ def test_settings_auto_discovers_existing_profile_json_when_default_missing(repo
     assert settings.resolved_target_profile_path == profile_dir / "nitin_datta_profile.canonical.json"
 
 
+def test_settings_prefers_named_canonical_profile_when_default_profile_is_missing(repo_root: Path) -> None:
+    profile_dir = repo_root / "profile"
+    _write_json(profile_dir / "profile.canonical.json", {"name": "Fallback"})
+    _write_json(
+        profile_dir / "nitin_datta_profile.canonical.json",
+        {
+            "name": "Nitin Datta",
+            "address": {
+                "street": "12 Swan Circuit",
+                "postcode": "5095",
+            },
+        },
+    )
+
+    settings = _make_settings(repo_root)
+
+    assert settings.resolved_profile_path == profile_dir / "profile.json"
+    assert settings.resolved_target_profile_path == profile_dir / "nitin_datta_profile.canonical.json"
+
+
+def test_settings_ignores_external_accounts_file_when_discovering_profile(repo_root: Path) -> None:
+    profile_dir = repo_root / "profile"
+    _write_json(
+        profile_dir / "external_accounts.json",
+        {"default": {"email": "nitin@example.com", "password": "secret"}},
+    )
+    _write_json(
+        profile_dir / "nitin_datta_profile.canonical.json",
+        {"name": "Nitin Datta"},
+    )
+
+    settings = _make_settings(repo_root)
+
+    assert settings.resolved_profile_path == profile_dir / "profile.json"
+    assert settings.resolved_external_accounts_path == profile_dir / "external_accounts.json"
+    assert settings.resolved_target_profile_path == profile_dir / "nitin_datta_profile.canonical.json"
+
+
 def test_settings_auto_discovers_first_docx_resume_when_default_missing(repo_root: Path) -> None:
     profile_dir = repo_root / "profile"
     profile_dir.mkdir(parents=True)
