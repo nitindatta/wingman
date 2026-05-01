@@ -279,6 +279,23 @@ export function collectExternalApplyObservation(): PageObservation {
     };
   };
 
+  const looksLikeControlTranscript = (text: string): boolean => {
+    const normalized = text.toLowerCase();
+    if (/\b(open list|selected:|aria-|setupconditionalattributeitems|aattributeitems)\b/.test(normalized)) return true;
+    if (text.length < 180) return false;
+    const optionWords = (normalized.match(/\b(select|choose|option|yes|no|none|basic|intermediate|proficient|fluent)\b/g) ?? []).length;
+    const validationWords = /\b(required|invalid|missing|must|cannot|can't|failed|error|enter a valid|please enter|please select)\b/.test(normalized);
+    return optionWords >= 4 && !validationWords;
+  };
+
+  const shouldKeepErrorText = (text: string, source: 'candidate' | 'validation'): boolean => {
+    if (!text) return false;
+    if (source === 'validation') return true;
+    if (looksLikeControlTranscript(text)) return false;
+    if (text.length <= 180) return true;
+    return /\b(required|invalid|missing|must|cannot|can't|failed|error|enter a valid|please enter|please select)\b/i.test(text);
+  };
+
   const fieldTypeFor = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string => {
     const tag = input.tagName.toLowerCase();
     if (tag === 'textarea') return 'textarea';
@@ -600,6 +617,7 @@ export function collectExternalApplyObservation(): PageObservation {
   ))
     .filter(isVisible)
     .map((el) => cleanText(el.textContent, 260))
+    .filter((text) => shouldKeepErrorText(text, 'candidate'))
     .filter(Boolean);
   for (const input of inputs) {
     if ('validationMessage' in input && input.validationMessage) {
@@ -609,7 +627,7 @@ export function collectExternalApplyObservation(): PageObservation {
   for (const field of fields) {
     if (!field.invalid) continue;
     const message = cleanText(field.validation_message || `${field.label || 'A field'} is invalid.`, 260);
-    if (message) {
+    if (shouldKeepErrorText(message, 'validation')) {
       errors.push(message);
     }
   }

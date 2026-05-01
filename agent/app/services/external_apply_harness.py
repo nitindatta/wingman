@@ -1851,7 +1851,26 @@ def _looks_like_slow_transition_click(observation: PageObservation, element_id: 
 
 def _has_substantive_page_errors(errors: list[str]) -> bool:
     progress_only = re.compile(r"^(current step \d+ of \d+|step \d+ of \d+)$", re.IGNORECASE)
-    return any(error.strip() and not progress_only.fullmatch(error.strip()) for error in errors)
+    return any(
+        error.strip()
+        and not progress_only.fullmatch(error.strip())
+        and not _looks_like_control_transcript_error(error)
+        for error in errors
+    )
+
+
+def _looks_like_control_transcript_error(error: str) -> bool:
+    text = _normalize_memory_text(error)
+    if not text:
+        return False
+    if any(marker in text for marker in ("open list", "selected", "setupconditionalattributeitems", "aattributeitems")):
+        return True
+    if len(error) < 180:
+        return False
+    option_tokens = {"select", "choose", "option", "yes", "no", "none", "basic", "intermediate", "proficient", "fluent"}
+    validation_tokens = {"required", "invalid", "missing", "must", "cannot", "failed", "error", "valid"}
+    tokens = set(text.split())
+    return len(tokens & option_tokens) >= 4 and not tokens & validation_tokens
 
 
 def _action_shape(actions: list[Any]) -> list[tuple[str, str, bool]]:

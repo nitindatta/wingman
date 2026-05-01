@@ -2054,6 +2054,94 @@ async def test_run_external_apply_step_coerces_login_stop_ready_to_sign_in_click
     assert state.submit_ready is False
 
 
+async def test_run_external_apply_step_does_not_treat_combobox_transcript_as_substantive_error() -> None:
+    observation = PageObservation(
+        url="https://secure.dc2.pageuppeople.com/apply/check",
+        page_type="form",
+        errors=[
+            "Are you currently authorised to work in Australia?* Open list Selected: "
+            "Yes - I am a permanent resident / citizen Select Yes - I am a permanent resident / citizen "
+            "Yes - I have a current work permit / visa No - I require sponsorship "
+            "SetupConditionalAttributeItems(9575, 28683, 1, 9574); aAttributeItems[9574] = aC"
+        ],
+        fields=[
+            ObservedField(
+                element_id="field_rights",
+                label="Are you currently authorised to work in Australia?*",
+                field_type="select",
+                current_value="Yes - I am a permanent resident / citizen",
+                required=True,
+                options=[
+                    "Select",
+                    "Yes - I am a permanent resident / citizen",
+                    "Yes - I have a current work permit / visa",
+                    "No - I require sponsorship",
+                ],
+            )
+        ],
+        buttons=[ObservedAction(element_id="button_continue", label="Continue", kind="submit")],
+    )
+    prior_click = ActionTrace(
+        observation=observation,
+        proposed_action=ProposedAction(
+            action_type="click",
+            element_id="button_continue",
+            confidence=0.95,
+            risk="low",
+            reason="Continue.",
+            source="page",
+        ),
+        policy_decision="allowed",
+        result=ActionResult(
+            ok=True,
+            action_type="click",
+            element_id="button_continue",
+            navigated=False,
+            new_url=observation.url,
+            errors=observation.errors,
+        ),
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        return ProposedAction(
+            action_type="click",
+            element_id="button_continue",
+            confidence=0.95,
+            risk="low",
+            reason="Required fields have useful values.",
+            source="page",
+        )
+
+    def policy(**_kwargs: Any) -> PolicyDecision:
+        return PolicyDecision(decision="allowed", reason="safe")
+
+    sleeps: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        recent_actions=[prior_click],
+        observe_fn=observe,
+        planner_fn=planner,
+        policy_fn=policy,
+        sleep_fn=sleep,
+    )
+
+    assert sleeps == [1.0, 2.0, 4.0]
+    assert state.status == "paused_for_user"
+    assert state.pending_user_question is not None
+    assert "page did not advance" in state.pending_user_question.question.lower()
+
+
 async def test_run_external_apply_step_passes_recent_executor_failure_diagnostics_to_planner() -> None:
     observation = PageObservation(
         url="https://secure.dc2.pageuppeople.com/apply/check",

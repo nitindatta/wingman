@@ -194,6 +194,52 @@ describe('collectExternalApplyObservation', () => {
     ]);
   });
 
+  it('does not report combobox option transcripts as validation errors', () => {
+    const observation = withDom(
+      `
+      <html>
+        <body>
+          <div class="field error-container">
+            <label for="q9574">Are you currently authorised to work in Australia?*</label>
+            <input
+              id="q9574"
+              role="combobox"
+              aria-controls="q9574-list"
+              aria-owns="q9574-list"
+              value="Yes - I am a permanent resident / citizen"
+            />
+            <span>
+              Are you currently authorised to work in Australia?* Open list
+              Selected: Yes - I am a permanent resident / citizen Select
+              Yes - I am a permanent resident / citizen
+              Yes - I have a current work permit / visa
+              No - I require sponsorship
+              SetupConditionalAttributeItems(9575, 28683, 1, 9574);
+              aAttributeItems[9574] = aC
+            </span>
+            <ul id="q9574-list" role="listbox" style="display:none">
+              <li role="option" data-value="">Select</li>
+              <li role="option" data-value="Yes - I am a permanent resident / citizen||28682|">
+                Yes - I am a permanent resident / citizen
+              </li>
+              <li role="option" data-value="Yes - I have a current work permit / visa||28683|">
+                Yes - I have a current work permit / visa
+              </li>
+              <li role="option" data-value="No - I require sponsorship||28684|">
+                No - I require sponsorship
+              </li>
+            </ul>
+          </div>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.fields[0]?.current_value).toBe('Yes - I am a permanent resident / citizen');
+    expect(observation.errors).toEqual([]);
+  });
+
   it('observes button-based listbox controls as select fields', () => {
     const observation = withDom(
       `
