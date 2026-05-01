@@ -1,6 +1,6 @@
 # Envoy
 
-A local, review-first autonomous job application agent. Envoy searches SEEK/Indeed/LinkedIn for jobs matching your criteria, drafts personalised cover letters, fills out application forms, and asks you to confirm before submitting. Agent runs on your own machine.
+A local, review-first autonomous job application agent. Envoy searches SEEK/Indeed/LinkedIn, evaluates fit against each job's must-have requirements, drafts grounded cover letters from your STAR evidence profile, fills out application forms on SEEK and external ATS portals, and asks you to confirm before submitting anything. Runs entirely on your own machine — your profile and applications never leave it.
 
 ---
 
