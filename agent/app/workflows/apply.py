@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Any, Literal
 
 log = logging.getLogger("apply")
@@ -60,6 +62,38 @@ from app.tools.client import ToolClient, ToolServiceError
 
 def _load_profile(settings: Settings) -> dict:
     return load_runtime_profile(settings)
+
+
+def _profile_with_cover_letter_artifacts(
+    profile: dict,
+    *,
+    settings: Settings,
+    application_id: str,
+    cover_letter: str,
+) -> dict:
+    text = cover_letter.strip()
+    if not text:
+        return profile
+
+    enriched = dict(profile)
+    enriched["cover_letter"] = text
+    cover_letter_path = _write_cover_letter_upload_file(settings, application_id, text)
+    if cover_letter_path is not None:
+        enriched["cover_letter_path"] = str(cover_letter_path)
+    return enriched
+
+
+def _write_cover_letter_upload_file(settings: Settings, application_id: str, cover_letter: str) -> Path | None:
+    safe_application_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", application_id).strip("._") or "application"
+    output_dir = (settings.repo_root / "automation" / "cover_letters").resolve()
+    output_path = output_dir / f"{safe_application_id}_cover_letter.txt"
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(cover_letter.rstrip() + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.warning("[external_apply] failed to write generated cover-letter upload file: %s", exc)
+        return None
+    return output_path
 
 
 def _is_session_lost(env) -> bool:
@@ -449,13 +483,21 @@ def build_apply_graph(
             "harness_status": previous_external.status if previous_external else "new",
         })
 
+        cover_letter = await draft_repo.get_cover_letter(state.application_id)
+        external_profile = _profile_with_cover_letter_artifacts(
+            profile,
+            settings=settings,
+            application_id=state.application_id,
+            cover_letter=cover_letter,
+        )
+
         try:
             external_state = await run_external_apply_step(
                 settings,
                 tool_client,
                 session_key=state.session_key,
                 application_id=state.application_id,
-                profile_facts=profile,
+                profile_facts=external_profile,
                 recent_actions=recent_actions,
                 question_cache=question_cache,
             )
@@ -489,7 +531,7 @@ def build_apply_graph(
                     tool_client,
                     session_key=recovered.session_key,
                     application_id=state.application_id,
-                    profile_facts=profile,
+                    profile_facts=external_profile,
                     recent_actions=[],
                     question_cache=question_cache,
                 )

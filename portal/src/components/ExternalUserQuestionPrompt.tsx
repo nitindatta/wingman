@@ -9,6 +9,8 @@ function detectInputMode(question: string, context: string): InputMode {
   if (
     /\b(choose|select|pick)\b.*\b(verify|verification|identity|authentication|auth)\b/.test(questionText)
     || /\b(authentication|auth|verification|identity)\s+method\b/.test(combined)
+    || /\b(identity|authentication|auth|verification)\s+(verification\s+)?option\b/.test(combined)
+    || /\bwhich\b.*\b(verification|identity|authentication|auth)\b.*\boption\b/.test(questionText)
   ) {
     return "text";
   }

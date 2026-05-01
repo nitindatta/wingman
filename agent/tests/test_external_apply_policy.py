@@ -477,6 +477,32 @@ def test_policy_accepts_resume_upload_from_configured_profile_file(tmp_path) -> 
     assert decision.decision == "allowed"
 
 
+def test_policy_accepts_cover_letter_upload_from_generated_profile_file(tmp_path) -> None:
+    cover_letter_path = tmp_path / "cover-letter.txt"
+    cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="file", required=False)],
+    )
+    action = ProposedAction(
+        action_type="upload_file",
+        element_id="field_cover",
+        value=str(cover_letter_path).replace("\\", "/"),
+        confidence=0.96,
+        risk="low",
+        reason="Cover letter upload comes from the generated application draft.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"cover_letter_path": str(cover_letter_path)},
+    )
+
+    assert decision.decision == "allowed"
+
+
 def test_policy_pauses_profile_resume_upload_to_non_resume_document_field(tmp_path) -> None:
     resume_path = tmp_path / "resume.docx"
     resume_path.write_bytes(b"docx")
@@ -582,6 +608,72 @@ def test_policy_allows_inferred_career_narrative_text_answer() -> None:
         confidence=0.88,
         risk="medium",
         reason="Synthesised from the candidate profile and observed job context.",
+        source="inferred",
+    )
+
+    decision = validate_external_apply_action(observation=observation, proposed_action=action)
+
+    assert decision.decision == "allowed"
+
+
+def test_policy_allows_inferred_profile_grounded_experience_text_answer() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[
+            ObservedField(
+                element_id="field_databricks",
+                label=(
+                    "Please outline your experience using Databricks. How many years' experience do you have "
+                    "and how have you used it?*"
+                ),
+                field_type="textarea",
+                required=True,
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="fill_text",
+        element_id="field_databricks",
+        value=(
+            "I have hands-on Databricks experience building modern data platforms, metadata driven ingestion "
+            "frameworks, and Spark based transformation workflows."
+        ),
+        confidence=0.88,
+        risk="medium",
+        reason="Synthesised from Databricks evidence in the candidate profile without inventing an exact duration.",
+        source="inferred",
+    )
+
+    decision = validate_external_apply_action(observation=observation, proposed_action=action)
+
+    assert decision.decision == "allowed"
+
+
+def test_policy_allows_inferred_leadership_experience_text_answer() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[
+            ObservedField(
+                element_id="field_leadership",
+                label=(
+                    "Please describe your leadership experience. How many people have reported to you "
+                    "at any given time and what were their roles?*"
+                ),
+                field_type="textarea",
+                required=True,
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="fill_text",
+        element_id="field_leadership",
+        value=(
+            "I have led technical delivery and architecture work, including a 50 member engineering team on a "
+            "digital transformation initiative."
+        ),
+        confidence=0.9,
+        risk="medium",
+        reason="Synthesised from leadership evidence in the candidate profile.",
         source="inferred",
     )
 

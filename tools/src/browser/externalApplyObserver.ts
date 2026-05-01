@@ -123,10 +123,22 @@ export function collectExternalApplyObservation(): PageObservation {
     return [explicit, wrapping, fieldsetLegend, containerLabel].some((candidate) => candidate != null && isVisible(candidate));
   };
 
+  const hasVisibleUploadAffordance = (input: HTMLInputElement): boolean => {
+    const container = nearestContainer(input);
+    if (!(container instanceof window.HTMLElement) || !isVisible(container)) return false;
+    if (hasVisibleAssociatedLabel(input)) return true;
+    const visibleUploadControl = Array.from(container.querySelectorAll<HTMLElement>(
+      'button, [role="button"], label, a, [class*="upload"], [class*="file"], [data-automation-id*="upload" i]',
+    )).some((candidate) => isVisible(candidate) && /\b(upload|attach|browse|choose|file|resume|cover letter|document)\b/i.test(cleanText(candidate.textContent, 180)));
+    if (visibleUploadControl) return true;
+    return /\b(upload|attach|browse|choose file|drop file|resume|cover letter|document)\b/i.test(cleanText(container.textContent, 260));
+  };
+
   const isObservableInput = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean => {
     if (isVisible(input)) return true;
     if (!(input instanceof window.HTMLInputElement)) return false;
     const type = input.type?.toLowerCase() || 'text';
+    if (type === 'file') return hasVisibleUploadAffordance(input);
     if (!['checkbox', 'radio'].includes(type)) return false;
     return hasVisibleAssociatedLabel(input);
   };
@@ -152,7 +164,43 @@ export function collectExternalApplyObservation(): PageObservation {
     el.closest('fieldset, [class*="question"], [class*="field"], [class*="form-group"], [class*="control"], [class*="input"], form, section, div')
     ?? el;
 
-  const textNear = (el: Element, max = 320): string => cleanText(nearestContainer(el).textContent, max);
+  const isFileInput = (el: Element): el is HTMLInputElement =>
+    el instanceof window.HTMLInputElement && (el.type?.toLowerCase() || '') === 'file';
+
+  const uploadContextForInput = (input: HTMLInputElement): Element => {
+    let fallback = nearestContainer(input);
+    let current = input.parentElement;
+    while (current && current !== document.body) {
+      if (isVisible(current)) {
+        const text = cleanText(current.textContent, 520);
+        const beforeControl = cleanText(text.split(/\b(?:upload file|choose file|browse|drag and drop|no file|loading)\b/i)[0], 260);
+        if (
+          /\b(upload file|choose file|browse|drag and drop)\b/i.test(text)
+          && /\b(attach|resume|resum[eé]|cv|cover letter|document|documentation)\b/i.test(beforeControl)
+        ) {
+          return current;
+        }
+      }
+      fallback = current;
+      current = current.parentElement;
+    }
+    return fallback;
+  };
+
+  const textNear = (el: Element, max = 320): string =>
+    cleanText(isFileInput(el) ? uploadContextForInput(el).textContent : nearestContainer(el).textContent, max);
+
+  const uploadLabelForInput = (input: HTMLInputElement): string => {
+    if ((input.type?.toLowerCase() || '') !== 'file') return '';
+    const nearby = cleanText(uploadContextForInput(input).textContent, 520);
+    const beforeControl = cleanText(
+      nearby
+        .split(/\b(?:upload file|choose file|browse|drag and drop|delete|no file|loading)\b/i)[0]
+        ?.replace(/\b[\w.-]+\.(?:docx?|pdf|rtf|txt)\b.*$/i, ''),
+      240,
+    );
+    return beforeControl || nearby;
+  };
 
   const labelForInput = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): string => {
     const labels = Array.from(document.querySelectorAll('label'));
@@ -160,10 +208,12 @@ export function collectExternalApplyObservation(): PageObservation {
     const wrapping = input.closest('label');
     const fieldsetLegend = input.closest('fieldset')?.querySelector('legend');
     const containerLabel = nearestContainer(input).querySelector('label, [class*="label"], [class*="title"], [class*="heading"]');
+    const fileUploadLabel = input instanceof window.HTMLInputElement ? uploadLabelForInput(input) : '';
     return cleanText(
       explicit?.textContent
       ?? wrapping?.textContent
       ?? fieldsetLegend?.textContent
+      ?? fileUploadLabel
       ?? containerLabel?.textContent
       ?? input.getAttribute('aria-label')
       ?? input.getAttribute('placeholder')
@@ -251,8 +301,11 @@ export function collectExternalApplyObservation(): PageObservation {
   };
 
   const requiredFor = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean => {
+    const label = labelForInput(input);
     const nearby = textNear(input, 180).toLowerCase();
-    return input.required || input.getAttribute('aria-required') === 'true' || nearby.includes('required') || /\*\s*$/.test(labelForInput(input));
+    const isFileInput = input instanceof window.HTMLInputElement && (input.type?.toLowerCase() || '') === 'file';
+    const nearbyRequired = isFileInput ? /\brequired\b/i.test(label) : nearby.includes('required');
+    return input.required || input.getAttribute('aria-required') === 'true' || nearbyRequired || /\*\s*$/.test(label);
   };
 
   const requiredForElement = (el: Element): boolean => {

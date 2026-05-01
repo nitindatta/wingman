@@ -27,6 +27,15 @@ describe("detectInputMode", () => {
     ).toBe("text");
   });
 
+  it("keeps identity verification option questions as text when one option is Create Password", () => {
+    expect(
+      detectInputMode(
+        "Which identity verification option would you like to use on this page: emailed one-time code, Create Passkey, or Create Password?",
+        "Identity verification is a sensitive account-access step.",
+      ),
+    ).toBe("text");
+  });
+
   it("keeps consent questions as consent mode", () => {
     expect(detectInputMode("Do you consent to the privacy policy?", "")).toBe("consent");
   });

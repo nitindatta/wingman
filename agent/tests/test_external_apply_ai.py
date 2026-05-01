@@ -256,6 +256,45 @@ def test_batch_fallback_does_not_use_resume_for_non_resume_file_upload() -> None
     assert actions[0].element_id == "field_cover"
 
 
+def test_fallback_uploads_generated_cover_letter_file_for_cover_letter_upload() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="file", required=False)],
+    )
+
+    action = fallback_proposed_action(
+        observation,
+        {
+            "resume_path": "C:/workspace/profile/example_resume.docx",
+            "cover_letter_path": "C:/workspace/automation/cover_letters/app-1_cover_letter.txt",
+        },
+        [],
+    )
+
+    assert action.action_type == "upload_file"
+    assert action.element_id == "field_cover"
+    assert action.value == "C:/workspace/automation/cover_letters/app-1_cover_letter.txt"
+    assert action.source == "profile"
+
+
+def test_fallback_pastes_generated_cover_letter_for_cover_letter_textarea() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="textarea", required=True)],
+    )
+
+    action = fallback_proposed_action(
+        observation,
+        {"cover_letter": "Dear Hiring Team,\n\nI am excited to apply.\n\nKind regards,\nNitin"},
+        [],
+    )
+
+    assert action.action_type == "fill_text"
+    assert action.element_id == "field_cover"
+    assert action.value == "Dear Hiring Team,\n\nI am excited to apply.\n\nKind regards,\nNitin"
+    assert action.source == "profile"
+
+
 def test_fallback_prefers_manual_entry_on_profile_entry_choice_page() -> None:
     observation = PageObservation(
         url="https://secure.workforceready.com.au/apply",
@@ -545,6 +584,7 @@ def test_batch_prompt_asks_for_multiple_safe_field_actions() -> None:
 
     assert "propose a page plan" in system
     assert "\"actions\"" in system
+    assert "available_facts.cover_letter_path" in system
     assert payload["page"]["fields"][0]["element_id"] == "field_1"
     assert payload["available_facts"]["first_name"] == "Nitin"
 
@@ -592,3 +632,82 @@ def test_batch_prompt_allows_profile_grounded_career_narrative_answers() -> None
     assert payload["available_facts"]["headline"] == "Principal Data Engineer"
     assert payload["available_facts"]["core_strengths"] == ["data platform architecture", "team leadership"]
     assert payload["available_facts"]["evidence_items"][0]["skills"] == ["Databricks", "AWS", "data modelling"]
+
+
+def test_batch_prompt_allows_profile_grounded_experience_answers_without_exact_invention() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        title="Additional Questions",
+        fields=[
+            ObservedField(
+                element_id="field_leadership",
+                label=(
+                    "Please describe your leadership experience. How many people have reported to you "
+                    "at any given time and what were their roles?*"
+                ),
+                field_type="textarea",
+                required=True,
+            ),
+            ObservedField(
+                element_id="field_databricks",
+                label=(
+                    "Please outline your experience using Databricks. How many years' experience do you have "
+                    "and how have you used it?*"
+                ),
+                field_type="textarea",
+                required=True,
+            ),
+            ObservedField(
+                element_id="field_ai",
+                label="What is your experience with AI prototyping?*",
+                field_type="textarea",
+                required=True,
+            ),
+            ObservedField(
+                element_id="field_power_bi",
+                label="Do you use Power BI? if so, please outline how you use it and what for*",
+                field_type="textarea",
+                required=True,
+            ),
+        ],
+        visible_text="Senior Data Engineer role with Databricks, AI prototyping, dashboards, and stakeholder work.",
+    )
+
+    system, user = build_external_apply_batch_planner_messages(
+        observation=observation,
+        profile_facts={
+            "headline": "AI & Data Systems Engineer",
+            "summary": "Hands on Data Engineer focused on scalable data and AI systems using Databricks and Spark.",
+            "core_strengths": ["Databricks", "LLM pipelines", "agent-based architectures"],
+            "evidence_items": [
+                {
+                    "role_title": "Senior Solution Architect",
+                    "skills": ["technical leadership", "Azure"],
+                    "action": "Led 50 member engineering team in digital transformation initiative.",
+                },
+                {
+                    "role_title": "Data Engineer",
+                    "skills": ["Databricks", "embeddings"],
+                    "action": "Built a Databricks based modern data platform.",
+                    "proof_points": [
+                        "Developed a metadata driven ingestion and transformation framework.",
+                        "Explored AI techniques including embeddings and probabilistic matching.",
+                    ],
+                },
+            ],
+        },
+        approved_memory=[],
+        recent_actions=[],
+    )
+
+    payload = json.loads(user)
+
+    assert "profile-grounded experience answers" in system
+    assert "leadership experience" in system
+    assert "experience with named technologies" in system
+    assert "instead of inventing exact years" in system
+    assert "unevidenced yes/no claim" in system
+    assert payload["page"]["fields"][1]["label"].startswith("Please outline your experience using Databricks")
+    assert payload["available_facts"]["evidence_items"][0]["action"] == (
+        "Led 50 member engineering team in digital transformation initiative."
+    )

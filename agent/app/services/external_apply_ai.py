@@ -62,6 +62,7 @@ _MANUAL_ENTRY_LABELS = re.compile(
     r"\b(type it in myself|enter manually|manual entry|fill (?:it )?in myself|type manually)\b"
 )
 _RESUME_UPLOAD_LABELS = re.compile(r"\b(resume|resum[eé]|cv|curriculum vitae)\b")
+_COVER_LETTER_LABELS = re.compile(r"\bcover\s+letter\b")
 _SECRET_KEY_PATTERN = re.compile(
     r"(?:^|_|\b)(password|passcode|passphrase|secret|token|otp|mfa|api[_-]?key|authorization)(?:$|_|\b)",
     re.IGNORECASE,
@@ -228,10 +229,20 @@ def build_external_apply_planner_messages(
         "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
-        "For career narrative questions such as why you are interested, why this opportunity, or how your "
-        "skills, experience, and passion fit the role, draft a concise tailored answer grounded only in "
-        "available_facts and observed page/job context; use source profile or inferred. "
-        "Ask the user when required information is missing, sensitive, a personal self-report, or ambiguous. "
+        "For career narrative and profile-grounded experience questions, draft a concise tailored answer grounded "
+        "only in available_facts and observed page/job context; use source profile or inferred. This includes "
+        "questions about why you are interested, why this opportunity, how your skills, experience, and passion fit "
+        "the role, leadership experience, experience with named technologies or methods, how you have used a skill, "
+        "and relevant examples from past work. Use evidenced numbers when present; otherwise use careful qualitative "
+        "wording such as several years, hands-on experience, or led a team/project instead of inventing exact years, "
+        "counts, certifications, or usage claims. "
+        "For cover-letter upload fields, use available_facts.cover_letter_path when present; for cover-letter "
+        "text areas, paste available_facts.cover_letter. For optional additional-document uploads without a "
+        "matching approved file path, leave them blank and continue when required fields are resolved. "
+        "Ask the user only when required information is missing, sensitive, ambiguous, or would require an "
+        "unevidenced yes/no claim, exact duration, exact headcount, certification, clearance, or credential. Do not "
+        "ask merely because an open text application question is phrased as a personal self-report when profile "
+        "evidence can support a grounded answer. "
         "When asking the user, ask for exactly one observed field per ask_user action; do not bundle multiple fields "
         "or multiple answers into one question. "
         "Never final-submit; return stop_ready_to_submit at the final submission gate. "
@@ -270,10 +281,20 @@ def build_external_apply_batch_planner_messages(
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
         "Prefer safe field actions before navigation, skip fields that already have useful current_value, "
-        "and draft career narrative answers for questions like why you are interested, why this opportunity, "
-        "or how your skills, experience, and passion fit the role when available_facts and observed page/job "
-        "context are enough. Use source profile or inferred for those grounded narrative answers. "
-        "Ask the user for required information that is missing, sensitive, a personal self-report, or ambiguous. "
+        "and draft career narrative or profile-grounded experience answers when available_facts and observed "
+        "page/job context are enough. This includes questions about why you are interested, why this opportunity, "
+        "how your skills, experience, and passion fit the role, leadership experience, experience with named "
+        "technologies or methods, how you have used a skill, and relevant examples from past work. Use source "
+        "profile or inferred for those grounded answers. Use evidenced numbers when present; otherwise use careful "
+        "qualitative wording such as several years, hands-on experience, or led a team/project instead of inventing "
+        "exact years, counts, certifications, or usage claims. "
+        "For cover-letter upload fields, use available_facts.cover_letter_path when present; for cover-letter "
+        "text areas, paste available_facts.cover_letter. For optional additional-document uploads without a "
+        "matching approved file path, leave them blank and continue when required fields are resolved. "
+        "Ask the user only for required information that is missing, sensitive, ambiguous, or would require an "
+        "unevidenced yes/no claim, exact duration, exact headcount, certification, clearance, or credential. Do not "
+        "ask merely because an open text application question is phrased as a personal self-report when profile "
+        "evidence can support a grounded answer. "
         "When asking the user, ask for exactly one observed field per ask_user action; return multiple ask_user "
         "actions when multiple fields need user input, and do not bundle multiple answers into one question. "
         "Do not include click, stop_ready_to_submit, or stop_failed after field actions in the same page plan; "
@@ -551,6 +572,8 @@ def _available_facts_for_prompt(profile_facts: dict[str, Any]) -> dict[str, Any]
         "proposal_preferences",
         "external_accounts",
         "resume_path",
+        "cover_letter",
+        "cover_letter_path",
     }
     return {
         key: _compact_prompt_fact(value)
@@ -793,6 +816,10 @@ def _looks_like_resume_upload_label(label: str) -> bool:
     return bool(_RESUME_UPLOAD_LABELS.search(label.lower()))
 
 
+def _looks_like_cover_letter_label(label: str) -> bool:
+    return bool(_COVER_LETTER_LABELS.search(label.lower()))
+
+
 def _looks_like_job_search_page(observation: PageObservation) -> bool:
     page_text = " ".join([observation.url, observation.title, observation.visible_text]).lower()
     if not re.search(r"\b(job search|perform a job search|suggestions will appear|classification list|saved searches)\b", page_text):
@@ -814,6 +841,13 @@ def _lookup_safe_value(
     label_lower = label.lower()
     if _looks_like_resume_upload_label(label_lower):
         value = _profile_path_value(profile_facts, "resume_path")
+        if value:
+            return str(value), "profile"
+    if _looks_like_cover_letter_label(label_lower):
+        value = _profile_path_value(
+            profile_facts,
+            "cover_letter_path" if field_type == "file" else "cover_letter",
+        )
         if value:
             return str(value), "profile"
 

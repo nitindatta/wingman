@@ -438,6 +438,16 @@ async def _planned_actions_for_observation(
     planner_fn: PlanFn,
     batch_planner_fn: BatchPlanFn | None,
 ) -> list[ProposedAction]:
+    post_upload_continue_action = _preapproved_completed_document_upload_continue_action(
+        observation,
+        recent_actions,
+        profile_facts,
+    )
+    if post_upload_continue_action is not None:
+        return [post_upload_continue_action]
+    preapproved_cover_letter_action = _preapproved_cover_letter_action(observation, recent_actions, profile_facts)
+    if preapproved_cover_letter_action is not None:
+        return [preapproved_cover_letter_action]
     preapproved_consent_action = _preapproved_generic_consent_action(observation, recent_actions, profile_facts)
     if preapproved_consent_action is not None:
         return [preapproved_consent_action]
@@ -585,7 +595,7 @@ def _build_planning_frame(
     phase = _planning_phase(observation, memory_context)
     strategies = [
         "fill_select_check_or_upload_safe_fields_from_available_facts_or_approved_memory",
-        "draft_profile_grounded_career_narrative_answers_for_interest_motivation_and_fit_questions",
+        "draft_profile_grounded_career_narrative_and_experience_answers",
         "ask_user_for_sensitive_personal_self_reports_or_missing_factual_answers",
         "click_navigation_only_after_current_page_required_fields_are_resolved",
         "return_stop_ready_to_submit_instead_of_final_submission",
@@ -607,6 +617,10 @@ def _build_planning_frame(
         blocked_actions.append("stop_ready_to_submit_on_login")
     if _profile_path_value(profile_facts, "resume_path"):
         hints.append("resume_path_available")
+    if _profile_path_value(profile_facts, "cover_letter_path"):
+        hints.append("cover_letter_path_available")
+    if _profile_path_value(profile_facts, "cover_letter"):
+        hints.append("cover_letter_text_available")
     if _has_resume_upload(observation):
         hints.append("direct_resume_cv_upload_observed")
     if _has_profile_entry_choice_without_direct_upload(observation):
@@ -704,6 +718,15 @@ def _looks_like_resume_upload_field(field: Any) -> bool:
     )
 
 
+def _looks_like_cover_letter_field(field: Any) -> bool:
+    text = " ".join([field.label or "", field.nearby_text or ""]).lower()
+    return bool(re.search(r"\bcover\s+letter\b", text))
+
+
+def _is_file_upload_field(field: Any) -> bool:
+    return (field.field_type or "").strip().lower() == "file" or field.control_kind == "file_upload"
+
+
 def _has_profile_entry_choice_without_direct_upload(observation: PageObservation) -> bool:
     page_text = " ".join([observation.title, observation.visible_text]).lower()
     return (
@@ -718,6 +741,15 @@ def _find_manual_entry_action(observation: PageObservation) -> Any | None:
         if action.disabled:
             continue
         if re.search(r"\b(type it in myself|enter manually|manual entry|fill (?:it )?in myself|type manually)\b", action.label.lower()):
+            return action
+    return None
+
+
+def _find_continue_action(observation: PageObservation) -> Any | None:
+    for action in (*observation.buttons, *observation.links):
+        if action.disabled:
+            continue
+        if re.search(r"\b(continue|next|save and continue|proceed)\b", action.label.lower()):
             return action
     return None
 
@@ -1940,6 +1972,130 @@ def _approved_generic_consent_keys(recent_actions: list[ActionTrace]) -> set[str
             continue
         approved.add(_question_key_for_action(action))
     return approved
+
+
+def _preapproved_completed_document_upload_continue_action(
+    observation: PageObservation,
+    recent_actions: list[ActionTrace],
+    profile_facts: dict[str, Any],
+) -> ProposedAction | None:
+    if observation.page_type != "resume_upload":
+        return None
+    if _has_resume_upload(observation):
+        return None
+    if _cover_letter_upload_still_observed(observation):
+        return None
+    if not _has_recent_successful_profile_upload(recent_actions, _profile_path_value(profile_facts, "resume_path")):
+        return None
+    cover_letter_path = _profile_path_value(profile_facts, "cover_letter_path")
+    if cover_letter_path and not _has_recent_successful_profile_upload(recent_actions, cover_letter_path):
+        return None
+    if any(_is_required_upload_field(field) for field in observation.fields):
+        return None
+    action = _find_continue_action(observation)
+    if action is None:
+        return None
+    return ProposedAction(
+        action_type="click",
+        element_id=action.element_id,
+        confidence=0.99,
+        risk="low",
+        reason=(
+            "The required resume upload and generated cover-letter upload already succeeded. "
+            "Only optional upload controls remain, so continue past stale PageUp upload messages."
+        ),
+        source="page",
+    )
+
+
+def _cover_letter_upload_still_observed(observation: PageObservation) -> bool:
+    return any(_is_file_upload_field(field) and _looks_like_cover_letter_field(field) for field in observation.fields)
+
+
+def _is_required_upload_field(field: Any) -> bool:
+    if not _is_file_upload_field(field):
+        return False
+    text = " ".join([str(field.label or ""), str(field.nearby_text or "")]).lower()
+    if "optional" in text:
+        return False
+    return bool(getattr(field, "required", False) or "*" in str(field.label or ""))
+
+
+def _has_recent_successful_profile_upload(recent_actions: list[ActionTrace], expected_path: Any) -> bool:
+    if not expected_path:
+        return False
+    expected = _normalize_path_for_compare(str(expected_path))
+    for trace in reversed(recent_actions):
+        action = trace.proposed_action
+        if action.action_type != "upload_file" or action.source != "profile":
+            continue
+        if _normalize_path_for_compare(action.value or "") != expected:
+            continue
+        return trace.result is not None and trace.result.ok
+    return False
+
+
+def _normalize_path_for_compare(value: str) -> str:
+    return str(value or "").replace("\\", "/").strip().lower()
+
+
+def _preapproved_cover_letter_action(
+    observation: PageObservation,
+    recent_actions: list[ActionTrace],
+    profile_facts: dict[str, Any],
+) -> ProposedAction | None:
+    cover_letter = _profile_path_value(profile_facts, "cover_letter")
+    cover_letter_path = _profile_path_value(profile_facts, "cover_letter_path")
+    if not cover_letter and not cover_letter_path:
+        return None
+
+    for field in observation.fields:
+        if not _looks_like_cover_letter_field(field):
+            continue
+        if field.current_value and not field.invalid:
+            continue
+        if _is_file_upload_field(field):
+            if not cover_letter_path:
+                continue
+            if _has_recent_successful_field_action(recent_actions, field.element_id, "upload_file"):
+                continue
+            return ProposedAction(
+                action_type="upload_file",
+                element_id=field.element_id,
+                value=str(cover_letter_path),
+                confidence=1.0,
+                risk="low",
+                reason="Cover letter upload uses the generated cover letter file for this application.",
+                source="profile",
+            )
+        if field.field_type in {"text", "textarea"} or field.control_kind in {"native_text", "unknown", None}:
+            if not cover_letter:
+                continue
+            if _has_recent_successful_field_action(recent_actions, field.element_id, "fill_text"):
+                continue
+            return ProposedAction(
+                action_type="fill_text",
+                element_id=field.element_id,
+                value=str(cover_letter),
+                confidence=1.0,
+                risk="low",
+                reason="Cover letter text field uses the generated cover letter for this application.",
+                source="profile",
+            )
+    return None
+
+
+def _has_recent_successful_field_action(
+    recent_actions: list[ActionTrace],
+    element_id: str,
+    action_type: str,
+) -> bool:
+    for trace in reversed(recent_actions):
+        action = trace.proposed_action
+        if action.action_type != action_type or action.element_id != element_id:
+            continue
+        return trace.result is not None and trace.result.ok
+    return False
 
 
 def _preapproved_generic_consent_action(

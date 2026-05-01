@@ -256,22 +256,47 @@ def _validate_upload_file_action(
         )
     if proposed_action.source != "profile":
         return None
-    if not _looks_like_resume_upload_field(target_field):
+    if _looks_like_resume_upload_field(target_field):
+        expected_values = _profile_values(profile_facts, ["resume_path"])
+        if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
+            return PolicyDecision(
+                decision="paused",
+                reason="Planner claimed a profile resume upload, but the file does not match profile_facts.resume_path.",
+                pause_reason="needs_approval",
+                risk_flags=["profile_value_mismatch"],
+            )
+        return None
+    if _looks_like_cover_letter_field(target_field):
+        expected_values = _profile_values(profile_facts, ["cover_letter_path"])
+        if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
+            resume_values = _profile_values(profile_facts, ["resume_path"])
+            if resume_values and _matches_any_expected_path(proposed_action.value, resume_values):
+                return PolicyDecision(
+                    decision="paused",
+                    reason="The configured profile resume may only be uploaded to observed resume/CV fields.",
+                    pause_reason="needs_approval",
+                    risk_flags=["profile_resume_target_mismatch"],
+                )
+            return PolicyDecision(
+                decision="paused",
+                reason="Planner claimed a generated cover-letter upload, but the file does not match profile_facts.cover_letter_path.",
+                pause_reason="needs_approval",
+                risk_flags=["profile_value_mismatch"],
+            )
+        return None
+    if _profile_values(profile_facts, ["resume_path"]):
         return PolicyDecision(
             decision="paused",
             reason="The configured profile resume may only be uploaded to observed resume/CV fields.",
             pause_reason="needs_approval",
             risk_flags=["profile_resume_target_mismatch"],
         )
-    expected_values = _profile_values(profile_facts, ["resume_path"])
-    if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
-        return PolicyDecision(
-            decision="paused",
-            reason="Planner claimed a profile resume upload, but the file does not match profile_facts.resume_path.",
-            pause_reason="needs_approval",
-            risk_flags=["profile_value_mismatch"],
-        )
-    return None
+    return PolicyDecision(
+        decision="paused",
+        reason="Profile file uploads are only allowed for observed resume/CV or cover-letter fields with matching configured paths.",
+        pause_reason="needs_approval",
+        risk_flags=["profile_upload_target_mismatch"],
+    )
 
 
 def _target_text(observation: PageObservation, element_id: str) -> str | None:
@@ -427,7 +452,15 @@ def _looks_like_career_narrative_field(field: ObservedField) -> bool:
             r"hit the ground running|"
             r"make a difference|"
             r"what (?:interests|motivates) you|"
-            r"motivation for (?:applying|this role)"
+            r"motivation for (?:applying|this role)|"
+            r"(?:describe|outline|summari[sz]e|detail|tell us about|what is|what's) (?:your )?"
+            r"(?:leadership|management|people leadership|technical leadership|experience|background)|"
+            r"(?:experience|background) (?:using|with|in|of)|"
+            r"how (?:many years'? )?(?:experience )?(?:do you have|have you used|have you worked|have you led)|"
+            r"how have you used|"
+            r"what .*experience .*with|"
+            r"relevant (?:experience|examples?)|"
+            r"past work"
             r")\b",
             text,
         )
@@ -444,6 +477,11 @@ def _is_file_upload_field(field: ObservedField) -> bool:
 def _looks_like_resume_upload_field(field: ObservedField) -> bool:
     label = " ".join([field.label, field.nearby_text]).lower()
     return bool(re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", label))
+
+
+def _looks_like_cover_letter_field(field: ObservedField) -> bool:
+    label = " ".join([field.label, field.nearby_text]).lower()
+    return bool(re.search(r"\bcover\s+letter\b", label))
 
 
 def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any]) -> list[str]:
@@ -467,6 +505,10 @@ def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any
         return _profile_values(profile_facts, ["linkedin_url", "contact.linkedin", "contact.linkedin_url"])
     if _looks_like_resume_upload_field(field):
         return _profile_values(profile_facts, ["resume_path"])
+    if _looks_like_cover_letter_field(field):
+        if _is_file_upload_field(field):
+            return _profile_values(profile_facts, ["cover_letter_path"])
+        return _profile_values(profile_facts, ["cover_letter"])
     if "full name" in label or label.strip() in {"name", "your name"}:
         return _profile_values(profile_facts, ["name", "full_name"])
     if "first name" in label:

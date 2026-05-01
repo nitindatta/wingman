@@ -357,6 +357,171 @@ async def test_run_external_apply_step_executes_when_policy_allows() -> None:
     assert state.completed_actions[0].policy_decision == "allowed"
 
 
+async def test_run_external_apply_step_uploads_generated_cover_letter_before_planner(tmp_path) -> None:
+    cover_letter_path = tmp_path / "cover-letter.txt"
+    cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
+    executed: list[ProposedAction] = []
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="resume_upload",
+            fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="file", required=False)],
+        )
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("cover-letter upload should be chosen before the LLM planner")
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(ok=True, action_type=action.action_type, element_id=action.element_id, value_after=action.value)
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"cover_letter_path": str(cover_letter_path)},
+        observe_fn=observe,
+        planner_fn=planner,
+        batch_planner_fn=None,
+        execute_fn=execute,
+    )
+
+    assert state.status == "running"
+    assert executed[0].action_type == "upload_file"
+    assert executed[0].element_id == "field_cover"
+    assert executed[0].value == str(cover_letter_path)
+
+
+async def test_run_external_apply_step_pastes_generated_cover_letter_before_planner() -> None:
+    cover_letter = "Dear Hiring Team,\n\nI am excited to apply.\n\nKind regards,\nNitin"
+    executed: list[ProposedAction] = []
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="form",
+            fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="textarea", required=True)],
+        )
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("cover-letter textarea should be chosen before the LLM planner")
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(ok=True, action_type=action.action_type, element_id=action.element_id, value_after=action.value)
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"cover_letter": cover_letter},
+        observe_fn=observe,
+        planner_fn=planner,
+        batch_planner_fn=None,
+        execute_fn=execute,
+    )
+
+    assert state.status == "running"
+    assert executed[0].action_type == "fill_text"
+    assert executed[0].element_id == "field_cover"
+    assert executed[0].value == cover_letter
+
+
+async def test_run_external_apply_step_continues_after_required_resume_and_cover_letter_uploads() -> None:
+    resume_path = "C:/workspace/profile/resume.docx"
+    cover_letter_path = "C:/workspace/automation/cover_letters/app-1_cover_letter.txt"
+    resume_observation = PageObservation(
+        url="https://ats.example/apply/resume",
+        page_type="resume_upload",
+        fields=[
+            ObservedField(element_id="field_resume", label="Please attach your resume*", field_type="file", required=True),
+            ObservedField(element_id="field_cover", label="Please attach your cover letter", field_type="file", required=False),
+            ObservedField(
+                element_id="field_other",
+                label="Please attach any other relevant documentation (optional)",
+                field_type="file",
+                required=False,
+            ),
+        ],
+    )
+    current_observation = PageObservation(
+        url="https://ats.example/apply/resume",
+        page_type="resume_upload",
+        visible_text="Your current resume must be uploaded in order to submit this application.",
+        fields=[
+            ObservedField(
+                element_id="field_other",
+                label="Please attach any other relevant documentation (optional)",
+                field_type="file",
+                required=False,
+            )
+        ],
+        buttons=[ObservedAction(element_id="button_continue", label="Continue", kind="submit")],
+        errors=["Your current resume must be uploaded in order to submit this application."],
+    )
+    recent_actions = [
+        ActionTrace(
+            observation=resume_observation,
+            proposed_action=ProposedAction(
+                action_type="upload_file",
+                element_id="field_cover",
+                value=cover_letter_path,
+                confidence=1.0,
+                risk="low",
+                reason="Upload generated cover letter.",
+                source="profile",
+            ),
+            policy_decision="allowed",
+            result=ActionResult(ok=True, action_type="upload_file", element_id="field_cover", value_after=cover_letter_path),
+        ),
+        ActionTrace(
+            observation=resume_observation,
+            proposed_action=ProposedAction(
+                action_type="upload_file",
+                element_id="field_resume",
+                value=resume_path,
+                confidence=1.0,
+                risk="low",
+                reason="Upload configured resume.",
+                source="profile",
+            ),
+            policy_decision="allowed",
+            result=ActionResult(ok=True, action_type="upload_file", element_id="field_resume", value_after=resume_path),
+        ),
+    ]
+    executed: list[ProposedAction] = []
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return current_observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("completed required uploads should continue before the LLM planner can stop_failed")
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(ok=True, action_type=action.action_type, element_id=action.element_id, navigated=True)
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"resume_path": resume_path, "cover_letter_path": cover_letter_path},
+        recent_actions=recent_actions,
+        observe_fn=observe,
+        planner_fn=planner,
+        batch_planner_fn=None,
+        execute_fn=execute,
+    )
+
+    assert state.status == "running"
+    assert executed[0].action_type == "click"
+    assert executed[0].element_id == "button_continue"
+
+
 async def test_run_external_apply_step_executes_safe_batch_before_pausing_once() -> None:
     async def observe(_client: Any, _session_key: str) -> PageObservation:
         return PageObservation(

@@ -62,6 +62,87 @@ describe('collectExternalApplyObservation', () => {
     expect(observation.errors).toContain('Email is required');
   });
 
+  it('observes hidden PageUp-style file inputs when their upload widgets are visible', () => {
+    const observation = withDom(
+      `
+      <html>
+        <head><title>Resume - SA Water</title></head>
+        <body>
+          <form>
+            <section class="question">
+              <p>Please attach your resume*</p>
+              <a href="/existing">nitin_datta_resume.docx (30 kb)</a>
+              <button type="button">Delete</button>
+              <input id="resumeFile" type="file" style="display:none" />
+            </section>
+            <section class="question">
+              <p>Please attach your cover letter</p>
+              <button type="button">Upload file</button>
+              <input id="coverFile" type="file" style="display:none" />
+            </section>
+            <section class="question">
+              <p>Please attach any other relevant documentation (optional)</p>
+              <button type="button">Upload file</button>
+              <input id="otherFile" type="file" style="display:none" />
+            </section>
+            <button type="submit">Continue</button>
+          </form>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.page_type).toBe('resume_upload');
+    expect(observation.uploads.map((upload) => upload.label)).toEqual([
+      'Please attach your resume*',
+      'Please attach your cover letter',
+      'Please attach any other relevant documentation (optional)',
+    ]);
+    expect(observation.uploads.map((upload) => upload.control_kind)).toEqual([
+      'file_upload',
+      'file_upload',
+      'file_upload',
+    ]);
+    expect(observation.uploads.find((upload) => upload.label === 'Please attach your resume*')?.required).toBe(true);
+    expect(observation.uploads.find((upload) => upload.label === 'Please attach your cover letter')?.required).toBe(false);
+  });
+
+  it('uses the enclosing PageUp question text for nested hidden upload inputs', () => {
+    const observation = withDom(
+      `
+      <html>
+        <body>
+          <form>
+            <section class="question">
+              <p>Please attach your resume*</p>
+              <div class="upload-control">
+                <button type="button">Upload file</button>
+                <input id="resumeFile" type="file" style="display:none" />
+              </div>
+            </section>
+            <section class="question">
+              <p>Please attach your cover letter</p>
+              <div class="upload-control">
+                <button type="button">Upload file</button>
+                <input id="coverFile" type="file" style="display:none" />
+              </div>
+            </section>
+          </form>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.uploads.map((upload) => upload.label)).toEqual([
+      'Please attach your resume*',
+      'Please attach your cover letter',
+    ]);
+    expect(observation.uploads[0]?.nearby_text).toContain('Please attach your resume*');
+    expect(observation.uploads[1]?.nearby_text).toContain('Please attach your cover letter');
+  });
+
   it('collapses radio groups into one observed field with options', () => {
     const observation = withDom(
       `

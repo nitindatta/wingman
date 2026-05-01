@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser Control Automation"
+  short_description: "Safer browser agent control"
+  default_prompt: "Use browser-control-automation to design or debug a browser-controlled workflow."
