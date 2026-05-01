@@ -1,3 +1,4 @@
+import { JSDOM } from 'jsdom';
 import { describe, expect, it, vi } from 'vitest';
 import { executeExternalApplyAction, elementIdSelector, truthyFormValue } from './externalApplyActions.js';
 
@@ -19,6 +20,14 @@ vi.mock('./externalApplyObserver.js', () => ({
 vi.mock('./snapshot.js', () => ({
   saveSnapshot: vi.fn(async (_page: unknown, kind: string) => `C:/tmp/${kind}.artifact`),
 }));
+
+function expectEvaluateArg(evaluate: ReturnType<typeof vi.fn>, expected: Record<string, unknown>): void {
+  expect(evaluate.mock.calls.some(([, arg]) => (
+    arg != null
+    && typeof arg === 'object'
+    && Object.entries(expected).every(([key, value]) => (arg as Record<string, unknown>)[key] === value)
+  ))).toBe(true);
+}
 
 describe('external apply action helpers', () => {
   it('builds a safe data attribute selector for observed element ids', () => {
@@ -98,7 +107,7 @@ describe('external apply action helpers', () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(focus).not.toHaveBeenCalled();
     expect(fill).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'indeed' }));
+    expectEvaluateArg(evaluate, { wantText: 'indeed' });
   });
 
   it('waits longer for slow button-backed combobox popups before failing', async () => {
@@ -164,7 +173,7 @@ describe('external apply action helpers', () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(focus).not.toHaveBeenCalled();
     expect(fill).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'seek' }));
+    expectEvaluateArg(evaluate, { wantText: 'seek' });
   });
 
   it('selects from an expanded button-backed combobox via its owned listbox', async () => {
@@ -232,8 +241,134 @@ describe('external apply action helpers', () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(focus).not.toHaveBeenCalled();
     expect(fill).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ ownedOnly: true }));
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'south australia' }));
+    expectEvaluateArg(evaluate, { ownedOnly: true });
+    expectEvaluateArg(evaluate, { wantText: 'south australia' });
+  });
+
+  it('selects a hidden PageUp-style combobox option by visible label and data-value prefix', async () => {
+    const dom = new JSDOM(
+      `
+      <html>
+        <body>
+          <label id="lbl9574" for="q9574" class="col-sm-12 col-md-5">
+            Are you currently authorised to work in Australia?<span class="asterisk">*</span>
+          </label>
+          <div id="q9574" class="input-group cb pu-select">
+            <input
+              id="q9574-edit"
+              class="q9574_edit form-control dropdownEdit"
+              autocomplete="off"
+              type="text"
+              tabindex="0"
+              role="combobox"
+              aria-labelledby="lbl9574"
+              aria-activedescendant="q9574--ID"
+              aria-autocomplete="both"
+              aria-owns="q9574-list"
+              aria-expanded="false"
+              aria-describedby="q9574-current-value"
+              aria-controls="q9574-list"
+              aria-required="true"
+              data-envoy-apply-id="field_9"
+              value=""
+            />
+            <div id="q9574-button-label" class="hidden">Open list</div>
+            <span class="input-group-btn">
+              <button id="q9574-button" aria-labelledby="q9574-button-label" aria-controls="q9574-list" tabindex="-1" class="btn" type="button">
+                <span class="caret"></span>
+              </button>
+            </span>
+            <input type="hidden" name="q9574" id="q9574-postback" class="hidden dropdownvalue" value="" />
+            <span id="q9574-current-value" class="sr-only"></span>
+            <ul id="q9574-list" class="cb_list" tabindex="-1" role="listbox" aria-expanded="false" style="display:none">
+              <li role="option" id="q9574--ID" data-value="" class="cb_option selected">Select</li>
+              <li role="option" id="q9574-Yes-Iamapermanentresident/citizen||28682|-ID" data-value="Yes - I am a permanent resident / citizen||28682|" class="cb_option">
+                Yes - I am a permanent resident / citizen
+              </li>
+              <li role="option" id="q9574-No-Irequiresponsorship||28684|-ID" data-value="No - I require sponsorship||28684|" class="cb_option">
+                No - I require sponsorship
+              </li>
+            </ul>
+          </div>
+        </body>
+      </html>
+      `,
+      { url: 'https://pageup.example/apply' },
+    );
+    const document = dom.window.document;
+    const combobox = document.querySelector<HTMLInputElement>('[data-envoy-apply-id="field_9"]');
+    const hidden = document.querySelector<HTMLInputElement>('#q9574-postback');
+    const listbox = document.querySelector<HTMLElement>('#q9574-list');
+    let dropdownOpened = false;
+    document.querySelector<HTMLButtonElement>('#q9574-button')?.addEventListener('click', () => {
+      dropdownOpened = true;
+      if (!listbox || !combobox) return;
+      listbox.style.display = 'block';
+      listbox.setAttribute('aria-expanded', 'true');
+      combobox.setAttribute('aria-expanded', 'true');
+    });
+
+    const target = {
+      first: () => target,
+      count: vi.fn(async () => 1),
+      click: vi.fn(async () => {}),
+      focus: vi.fn(async () => {}),
+      fill: vi.fn(async () => {}),
+      evaluate: vi.fn(async (fn: (node: Element) => unknown) => fn(combobox as Element)),
+    };
+    const page = {
+      url: () => 'https://pageup.example/apply',
+      locator: () => target,
+      evaluate: vi.fn(async (fn: (arg: never) => unknown, arg: never) => {
+        const previousWindow = (globalThis as { window?: Window }).window;
+        const previousDocument = (globalThis as { document?: Document }).document;
+        const previousHTMLElement = (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement;
+        (globalThis as { window?: Window }).window = dom.window as unknown as Window;
+        (globalThis as { document?: Document }).document = document;
+        (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement =
+          dom.window.HTMLElement as unknown as typeof HTMLElement;
+        try {
+          if (typeof fn === 'string') {
+            return eval(fn);
+          }
+          const source = String(fn).replace(
+            /=>\s*\{/,
+            '=> { const __envoyInjectedName = __name((value) => value, "__envoyInjectedName"); void __envoyInjectedName;',
+          );
+          const evaluated = eval(`(${source})`) as (value: never) => unknown;
+          return evaluated(arg);
+        } finally {
+          if (previousWindow) (globalThis as { window?: Window }).window = previousWindow;
+          else delete (globalThis as { window?: Window }).window;
+          if (previousDocument) (globalThis as { document?: Document }).document = previousDocument;
+          else delete (globalThis as { document?: Document }).document;
+          if (previousHTMLElement) (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement = previousHTMLElement;
+          else delete (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement;
+        }
+      }),
+      waitForTimeout: vi.fn(async () => {}),
+    };
+
+    const result = await executeExternalApplyAction(
+      page as never,
+      {
+        action_type: 'select_option',
+        element_id: 'field_9',
+        value: 'Yes - I am a permanent resident / citizen',
+      },
+    );
+
+    expect(result.message).toBe('action executed');
+    expect(result.ok).toBe(true);
+    expect(dropdownOpened).toBe(true);
+    expect(target.fill).not.toHaveBeenCalled();
+    expect(combobox?.value).toBe('Yes - I am a permanent resident / citizen');
+    expect(combobox?.getAttribute('aria-expanded')).toBe('false');
+    expect(hidden?.value).toBe('Yes - I am a permanent resident / citizen||28682|');
+    expect(document.querySelector('#q9574--ID')?.className).toBe('cb_option');
+    expect(document.querySelector('#q9574-Yes-Iamapermanentresident\\/citizen\\|\\|28682\\|-ID')?.className).toBe(
+      'cb_option selected',
+    );
   });
 
   it('falls through to the owned listbox when a global listbox does not match', async () => {
@@ -301,8 +436,8 @@ describe('external apply action helpers', () => {
     expect(result.ok).toBe(true);
     expect(focus).not.toHaveBeenCalled();
     expect(unrelatedOptions[0]?.click).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ ownedOnly: true }));
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'seek' }));
+    expectEvaluateArg(evaluate, { ownedOnly: true });
+    expectEvaluateArg(evaluate, { wantText: 'seek' });
   });
 
   it('recovers when a button-backed combobox owned listbox appears only in a late final pass', async () => {
@@ -367,11 +502,11 @@ describe('external apply action helpers', () => {
     );
 
     expect(result.ok).toBe(true);
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({
+    expectEvaluateArg(evaluate, {
       ownedOnly: true,
       requireExpanded: false,
-    }));
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'seek' }));
+    });
+    expectEvaluateArg(evaluate, { wantText: 'seek' });
   });
 
   it('falls back to the first usable salutation option when the configured value is unavailable', async () => {
@@ -434,7 +569,7 @@ describe('external apply action helpers', () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(focus).not.toHaveBeenCalled();
     expect(fill).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'mx' }));
+    expectEvaluateArg(evaluate, { wantText: 'mx' });
   });
 
   it('matches strict state selects through shared aliases like South Australia and SA', async () => {
@@ -496,7 +631,7 @@ describe('external apply action helpers', () => {
     expect(click).toHaveBeenCalledTimes(1);
     expect(focus).not.toHaveBeenCalled();
     expect(fill).not.toHaveBeenCalled();
-    expect(evaluate).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ wantText: 'sa' }));
+    expectEvaluateArg(evaluate, { wantText: 'sa' });
   });
 
   it('does not type into button-backed comboboxes and fails strict selects when the chosen value does not stick', async () => {

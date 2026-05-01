@@ -76,6 +76,30 @@ def test_policy_allows_password_fill_from_external_accounts_default() -> None:
     assert decision.decision == "allowed"
 
 
+def test_policy_allows_high_risk_password_fill_when_it_matches_external_accounts_default() -> None:
+    observation = PageObservation(
+        url="https://ats.example/login",
+        fields=[ObservedField(element_id="field_password", label="Password", field_type="password")],
+    )
+    action = ProposedAction(
+        action_type="fill_text",
+        element_id="field_password",
+        value="configured-secret",
+        confidence=0.94,
+        risk="high",
+        reason="Password comes from the configured external accounts file.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"external_accounts": {"default": {"password": "configured-secret"}}},
+    )
+
+    assert decision.decision == "allowed"
+
+
 def test_policy_allows_prior_employment_answer_from_profile_history() -> None:
     observation = PageObservation(
         url="https://ats.example/apply",
@@ -427,7 +451,9 @@ def test_policy_accepts_canonical_street_address_as_profile_value() -> None:
     assert decision.decision == "allowed"
 
 
-def test_policy_accepts_resume_upload_from_configured_profile_file() -> None:
+def test_policy_accepts_resume_upload_from_configured_profile_file(tmp_path) -> None:
+    resume_path = tmp_path / "resume.docx"
+    resume_path.write_bytes(b"docx")
     observation = PageObservation(
         url="https://ats.example/apply",
         fields=[ObservedField(element_id="field_resume", label="Resume", field_type="file", required=True)],
@@ -435,7 +461,7 @@ def test_policy_accepts_resume_upload_from_configured_profile_file() -> None:
     action = ProposedAction(
         action_type="upload_file",
         element_id="field_resume",
-        value="C:/workspace/profile/example_resume.docx",
+        value=str(resume_path).replace("\\", "/"),
         confidence=0.96,
         risk="low",
         reason="Resume upload comes from the configured profile resume file.",
@@ -445,10 +471,62 @@ def test_policy_accepts_resume_upload_from_configured_profile_file() -> None:
     decision = validate_external_apply_action(
         observation=observation,
         proposed_action=action,
-        profile_facts={"resume_path": "C:/workspace/profile/example_resume.docx"},
+        profile_facts={"resume_path": str(resume_path)},
     )
 
     assert decision.decision == "allowed"
+
+
+def test_policy_pauses_profile_resume_upload_to_non_resume_document_field(tmp_path) -> None:
+    resume_path = tmp_path / "resume.docx"
+    resume_path.write_bytes(b"docx")
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="file", required=True)],
+    )
+    action = ProposedAction(
+        action_type="upload_file",
+        element_id="field_cover",
+        value=str(resume_path),
+        confidence=0.96,
+        risk="low",
+        reason="Planner chose the configured profile resume.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"resume_path": str(resume_path)},
+    )
+
+    assert decision.decision == "paused"
+    assert "profile_resume_target_mismatch" in decision.risk_flags
+
+
+def test_policy_pauses_upload_when_file_is_missing() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_resume", label="Resume", field_type="file", required=True)],
+    )
+    action = ProposedAction(
+        action_type="upload_file",
+        element_id="field_resume",
+        value="C:/workspace/profile/missing.docx",
+        confidence=0.96,
+        risk="low",
+        reason="Planner chose the configured profile resume.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"resume_path": "C:/workspace/profile/missing.docx"},
+    )
+
+    assert decision.decision == "paused"
+    assert "upload_file_missing" in decision.risk_flags
 
 
 def test_policy_rejects_unknown_element() -> None:

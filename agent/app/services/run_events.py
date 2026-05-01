@@ -93,6 +93,18 @@ def set_node(node_name: str | None) -> None:
     _current_node = node_name
 
 
+def current_run_id() -> str:
+    """Return the active run id for auxiliary logs that sit outside the event bus."""
+
+    return _current_run_id.get() or _last_run_id or "unknown"
+
+
+def current_node() -> str | None:
+    """Return the active LangGraph node for auxiliary logs."""
+
+    return _current_node
+
+
 def emit(event_type: str, label: str, data: dict[str, Any], *, run_id: str | None = None) -> None:
     rid = run_id or _current_run_id.get() or "unknown"
     log.info("[event] type=%-12s run_id=%.12s  %s", event_type, rid, label)

@@ -151,6 +151,45 @@ class UserQuestion(BaseModel):
     question_key: str | None = None
 
 
+class ExternalApplyMemoryContext(BaseModel):
+    portal_host: str = ""
+    portal_identity: str = ""
+    account_mode: str | None = None
+    account_status: str | None = None
+    account_email: str | None = None
+    credential_available: bool = False
+    credential_status: str | None = None
+    login_attempted: bool = False
+    saved_login_rejected: bool = False
+    create_account_available: bool = False
+    recommendations: list[str] = Field(default_factory=list)
+    rejected_attempts: list[dict[str, str]] = Field(default_factory=list)
+    recent_failures: list[dict[str, object]] = Field(default_factory=list)
+
+
+PlanningPhase = Literal[
+    "unknown",
+    "login",
+    "account_recovery",
+    "profile_form",
+    "document_upload",
+    "screening",
+    "review",
+    "final_submit",
+    "captcha",
+]
+
+
+class PlanningFrame(BaseModel):
+    phase: PlanningPhase = "unknown"
+    objective: str = "Plan the safest next application action from the current observation."
+    strategies: list[str] = Field(default_factory=list)
+    hints: list[str] = Field(default_factory=list)
+    recommended_actions: list[dict[str, object]] = Field(default_factory=list)
+    blocked_actions: list[str] = Field(default_factory=list)
+    safety_notes: list[str] = Field(default_factory=list)
+
+
 class ExternalApplyState(BaseModel):
     application_id: str
     current_url: str = ""
@@ -159,6 +198,8 @@ class ExternalApplyState(BaseModel):
     observation: PageObservation | None = None
     proposed_action: ProposedAction | None = None
     last_action_result: ActionResult | None = None
+    memory_context: ExternalApplyMemoryContext | None = None
+    planning_frame: PlanningFrame | None = None
 
     completed_actions: list[ActionTrace] = Field(default_factory=list)
     pending_user_question: UserQuestion | None = None

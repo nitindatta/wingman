@@ -6,6 +6,12 @@ type InputMode = "consent" | "email" | "password" | "text" | "review";
 function detectInputMode(question: string, context: string): InputMode {
   const questionText = question.toLowerCase();
   const combined = `${question} ${context}`.toLowerCase();
+  if (
+    /\b(choose|select|pick)\b.*\b(verify|verification|identity|authentication|auth)\b/.test(questionText)
+    || /\b(authentication|auth|verification|identity)\s+method\b/.test(combined)
+  ) {
+    return "text";
+  }
   if (/\b(e-?mail)\b/.test(questionText)) {
     return "email";
   }

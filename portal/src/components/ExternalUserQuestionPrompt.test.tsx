@@ -18,6 +18,15 @@ describe("detectInputMode", () => {
     expect(detectInputMode("What password should be used?", "")).toBe("password");
   });
 
+  it("keeps authentication method choices as text even when one option is Create Password", () => {
+    expect(
+      detectInputMode(
+        "Choose how to verify your identity for this portal: emailed one-time code, Google, LinkedIn, Create Passkey, or Create Password.",
+        "The next step is selecting an authentication method.",
+      ),
+    ).toBe("text");
+  });
+
   it("keeps consent questions as consent mode", () => {
     expect(detectInputMode("Do you consent to the privacy policy?", "")).toBe("consent");
   });

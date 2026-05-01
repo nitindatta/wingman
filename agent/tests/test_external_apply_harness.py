@@ -29,6 +29,25 @@ class DummyToolClient:
     pass
 
 
+class FakeQuestionCache:
+    def __init__(self, found: str | None = None) -> None:
+        self.found = found
+        self.saved: list[tuple[str, str, str | None, str]] = []
+
+    async def find(self, _question_raw: str) -> str | None:
+        return self.found
+
+    async def save(
+        self,
+        question_raw: str,
+        answer: str,
+        field_type: str | None = None,
+        source: str = "human",
+    ) -> str:
+        self.saved.append((question_raw, answer, field_type, source))
+        return "cache-id"
+
+
 def test_validate_external_apply_action_rejects_skip_navigation_clicks() -> None:
     observation = PageObservation(
         url="https://ats.example/apply",
@@ -131,6 +150,128 @@ async def test_plan_external_apply_step_pauses_for_user_question() -> None:
     assert state.pending_user_question is not None
     assert state.pending_user_question.question == "What salary should I enter?"
     assert state.pending_user_question.target_element_id == "field_salary"
+
+
+async def test_plan_external_apply_step_splits_compound_user_question_into_field_questions() -> None:
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://secure.dc2.pageuppeople.com/apply",
+            title="Diversity",
+            page_type="form",
+            fields=[
+                ObservedField(
+                    element_id="field_birth_country",
+                    label="Please enter your country of birth.*",
+                    field_type="text",
+                    required=True,
+                ),
+                ObservedField(
+                    element_id="field_diverse",
+                    label="Are you from a linguistically and/or culturally diverse background?*",
+                    field_type="select",
+                    current_value="Select",
+                    required=True,
+                    options=["Select", "Yes", "No", "Prefer not to say"],
+                ),
+                ObservedField(
+                    element_id="field_language_1",
+                    label="Language 1:",
+                    field_type="select",
+                    current_value="English",
+                    options=["Select", "English", "Hindi"],
+                ),
+                ObservedField(
+                    element_id="field_language_1_speaking",
+                    label="Language 1 Speaking proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+                ObservedField(
+                    element_id="field_language_1_reading",
+                    label="Language 1 Reading proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+                ObservedField(
+                    element_id="field_language_1_writing",
+                    label="Language 1 Writing proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+                ObservedField(
+                    element_id="field_language_2",
+                    label="Language 2:",
+                    field_type="select",
+                    current_value="Hindi",
+                    options=["Select", "English", "Hindi"],
+                ),
+                ObservedField(
+                    element_id="field_language_2_speaking",
+                    label="Language 2 Speaking proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+                ObservedField(
+                    element_id="field_language_2_reading",
+                    label="Language 2 Reading proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+                ObservedField(
+                    element_id="field_language_2_writing",
+                    label="Language 2 Writing proficiency",
+                    field_type="select",
+                    current_value="Select",
+                    options=["Select", "None", "Basic", "Intermediate", "Proficient", "Fluent"],
+                ),
+            ],
+        )
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        return ProposedAction(
+            action_type="ask_user",
+            element_id="field_birth_country",
+            question=(
+                "Please provide the remaining answers needed for this Diversity page: "
+                "1) What is your country of birth? "
+                "2) Are you from a linguistically and/or culturally diverse background? Options: Yes, No, or Prefer not to say. "
+                "3) For Language 1 English, what are your speaking, reading, and writing proficiencies? "
+                "4) For Language 2 Hindi, what are your speaking, reading, and writing proficiencies?"
+            ),
+            confidence=0.99,
+            risk="medium",
+            reason="The remaining unresolved fields require user judgement.",
+            source="none",
+        )
+
+    state = await plan_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "paused_for_user"
+    assert [question.target_element_id for question in state.pending_user_questions] == [
+        "field_birth_country",
+        "field_diverse",
+        "field_language_1_speaking",
+        "field_language_1_reading",
+        "field_language_1_writing",
+        "field_language_2_speaking",
+        "field_language_2_reading",
+        "field_language_2_writing",
+    ]
+    assert state.pending_user_question is not None
+    assert state.pending_user_question.target_element_id == "field_birth_country"
 
 
 async def test_plan_external_apply_step_marks_ready_to_submit() -> None:
@@ -300,6 +441,63 @@ async def test_run_external_apply_step_executes_safe_batch_before_pausing_once()
     assert state.pending_user_question.target_element_id == "field_3"
     assert len(state.completed_actions) == 3
     assert state.completed_actions[-1].policy_decision == "paused"
+
+
+async def test_run_external_apply_step_reobserves_before_terminal_action_after_fill() -> None:
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/login",
+            page_type="login",
+            fields=[ObservedField(element_id="field_email", label="Email", field_type="text")],
+        )
+
+    async def batch_planner(_settings: Any, **_kwargs: Any) -> list[ProposedAction]:
+        return [
+            ProposedAction(
+                action_type="fill_text",
+                element_id="field_email",
+                value="candidate@example.com",
+                confidence=0.96,
+                risk="low",
+                reason="Email comes from profile.",
+                source="profile",
+            ),
+            ProposedAction(
+                action_type="stop_ready_to_submit",
+                confidence=0.92,
+                risk="high",
+                reason="Incorrectly thought the page was ready for final submit.",
+                source="page",
+            ),
+        ]
+
+    executed: list[str | None] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action.element_id)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url="https://ats.example/login",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"email": "candidate@example.com"},
+        observe_fn=observe,
+        batch_planner_fn=batch_planner,
+        execute_fn=execute,
+    )
+
+    assert executed == ["field_email"]
+    assert state.status == "running"
+    assert state.submit_ready is False
+    assert state.completed_actions[-1].proposed_action.action_type == "fill_text"
 
 
 async def test_run_external_apply_step_collects_multiple_user_questions_from_batch_plan() -> None:
@@ -1363,6 +1561,171 @@ async def test_apply_external_user_answer_checks_confirmed_checkbox() -> None:
     assert updated.completed_actions[-1].proposed_action.action_type == "set_checkbox"
 
 
+async def test_apply_external_user_answer_saves_field_answer_to_question_cache() -> None:
+    cache = FakeQuestionCache()
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        page_type="screening_questions",
+        fields=[
+            ObservedField(
+                element_id="field_notice",
+                label="What is your notice period?",
+                field_type="text",
+                required=True,
+            )
+        ],
+    )
+    state = ExternalApplyState(
+        application_id="app-1",
+        current_url=observation.url,
+        page_type="screening_questions",
+        observation=observation,
+        pending_user_question=UserQuestion(
+            question="How should I answer: What is your notice period?",
+            target_element_id="field_notice",
+        ),
+        status="paused_for_user",
+    )
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url=observation.url,
+        )
+
+    updated = await apply_external_user_answer(
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        external_state=state,
+        answer="4 weeks",
+        question_cache=cache,  # type: ignore[arg-type]
+        execute_fn=execute,
+    )
+
+    assert updated.status == "running"
+    assert cache.saved == [("What is your notice period?", "4 weeks", "text", "human_external")]
+
+
+async def test_apply_external_user_answer_does_not_save_password_to_question_cache() -> None:
+    cache = FakeQuestionCache()
+    observation = PageObservation(
+        url="https://ats.example/login",
+        page_type="login",
+        fields=[
+            ObservedField(
+                element_id="field_password",
+                label="Password",
+                field_type="password",
+                required=True,
+            )
+        ],
+    )
+    state = ExternalApplyState(
+        application_id="app-1",
+        current_url=observation.url,
+        page_type="login",
+        observation=observation,
+        pending_user_question=UserQuestion(
+            question="How should I answer: Password?",
+            target_element_id="field_password",
+        ),
+        status="paused_for_user",
+    )
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url=observation.url,
+        )
+
+    updated = await apply_external_user_answer(
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        external_state=state,
+        answer="new-password",
+        question_cache=cache,  # type: ignore[arg-type]
+        execute_fn=execute,
+    )
+
+    assert updated.status == "running"
+    assert cache.saved == []
+
+
+async def test_apply_external_user_answers_binds_indirect_yes_no_question_to_radio_group() -> None:
+    observation = PageObservation(
+        url="https://secure.dc2.pageuppeople.com/apply",
+        page_type="screening_questions",
+        fields=[
+            ObservedField(element_id="field_6", label="Yes", field_type="checkbox"),
+            ObservedField(element_id="field_7", label="No", field_type="checkbox"),
+            ObservedField(
+                element_id="field_8",
+                label=(
+                    "Have you received a TVSP and separated from the South Australian "
+                    "Public Sector in the last three years?*"
+                ),
+                field_type="radio",
+                control_kind="native_radio_group",
+                required=True,
+                options=["Yes", "No"],
+            ),
+        ],
+    )
+    question = UserQuestion(
+        question=(
+            "Have you received a Targeted Voluntary Separation Package (TVSP) and separated "
+            "from the South Australian Public Sector in the last three years? Please answer Yes or No."
+        ),
+        context="This is a required eligibility question and there is no approved fact or memory.",
+        question_key="question-indirect_tvsp",
+    )
+    state = ExternalApplyState(
+        application_id="app-1",
+        current_url=observation.url,
+        page_type="screening_questions",
+        observation=observation,
+        pending_user_question=question,
+        pending_user_questions=[question],
+        status="paused_for_user",
+    )
+
+    executed: list[ProposedAction] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url=observation.url,
+        )
+
+    updated = await apply_external_user_answers(
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        external_state=state,
+        answers_by_element_id={},
+        answers_by_question_key={"question-indirect_tvsp": "No"},
+        execute_fn=execute,
+    )
+
+    assert updated.status == "running"
+    assert updated.pending_user_question is None
+    assert updated.pending_user_questions == []
+    assert len(executed) == 1
+    assert executed[0].action_type == "set_radio"
+    assert executed[0].element_id == "field_8"
+    assert executed[0].value == "No"
+    assert updated.completed_actions[-1].proposed_action.source == "user"
+
+
 async def test_run_external_apply_step_reuses_recent_user_answer_when_field_id_changes() -> None:
     previous_observation = PageObservation(
         url="https://ats.example/apply",
@@ -1453,6 +1816,446 @@ async def test_run_external_apply_step_reuses_recent_user_answer_when_field_id_c
     assert state.status == "running"
     assert state.pending_user_question is None
     assert state.completed_actions[-1].proposed_action.source == "memory"
+
+
+async def test_run_external_apply_step_uses_memory_context_to_create_account_after_rejected_login() -> None:
+    login_observation = PageObservation(
+        url="https://secure.workforceready.com.au/apply/login",
+        page_type="login",
+        errors=["Invalid username or password."],
+        fields=[
+            ObservedField(
+                element_id="field_email",
+                label="Username",
+                field_type="text",
+                required=True,
+                current_value="candidate@example.com",
+            ),
+            ObservedField(
+                element_id="field_password",
+                label="Password",
+                field_type="password",
+                required=True,
+                invalid=True,
+                validation_message="Password is marked invalid.",
+            ),
+        ],
+        buttons=[
+            ObservedAction(element_id="button_login", label="Login", kind="submit"),
+            ObservedAction(element_id="button_create", label="Create a new account", kind="button"),
+        ],
+    )
+    password_filled = ActionTrace(
+        observation=login_observation,
+        proposed_action=ProposedAction(
+            action_type="fill_text",
+            element_id="field_password",
+            value="default-password",
+            confidence=0.95,
+            risk="low",
+            reason="Default external password.",
+            source="profile",
+        ),
+        policy_decision="allowed",
+        result=ActionResult(
+            ok=True,
+            action_type="fill_text",
+            element_id="field_password",
+            value_after="default-password",
+            new_url=login_observation.url,
+        ),
+    )
+    login_clicked = ActionTrace(
+        observation=login_observation,
+        proposed_action=ProposedAction(
+            action_type="click",
+            element_id="button_login",
+            confidence=0.9,
+            risk="medium",
+            reason="Try saved login.",
+            source="page",
+        ),
+        policy_decision="allowed",
+        result=ActionResult(
+            ok=True,
+            action_type="click",
+            element_id="button_login",
+            navigated=True,
+            new_url=login_observation.url,
+            errors=["Invalid username or password."],
+        ),
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return login_observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("memory-context account routing should run before the planner")
+
+    def policy(**_kwargs: Any) -> PolicyDecision:
+        return PolicyDecision(decision="allowed", reason="safe")
+
+    executed: list[str | None] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action.element_id)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            new_url="https://secure.workforceready.com.au/apply/create-account",
+            navigated=True,
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "external_accounts": {
+                "default": {"email": "candidate@example.com", "password": "default-password"}
+            }
+        },
+        recent_actions=[password_filled, login_clicked],
+        observe_fn=observe,
+        planner_fn=planner,
+        policy_fn=policy,
+        execute_fn=execute,
+    )
+
+    assert executed == ["button_create"]
+    assert state.memory_context is not None
+    assert state.memory_context.saved_login_rejected is True
+    assert state.memory_context.portal_identity == "secure.workforceready.com.au"
+    assert state.memory_context.account_email == "candidate@example.com"
+    assert state.memory_context.credential_available is True
+    assert state.memory_context.credential_status == "rejected"
+    assert state.completed_actions[-1].proposed_action.source == "memory"
+
+
+async def test_run_external_apply_step_passes_portal_scoped_account_memory_to_planner() -> None:
+    observation = PageObservation(
+        url="https://tenant.workdayjobs.com/apply/login",
+        title="Candidate Home",
+        page_type="login",
+        fields=[ObservedField(element_id="field_email", label="Email", field_type="email")],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        memory_context = kwargs["memory_context"]
+        assert memory_context["portal_host"] == "tenant.workdayjobs.com"
+        assert memory_context["account_status"] == "created"
+        assert memory_context["account_email"] == "portal@example.com"
+        assert memory_context["credential_available"] is True
+        assert memory_context["credential_status"] == "verified"
+        assert any("created" in item for item in memory_context["recommendations"])
+        return ProposedAction(
+            action_type="ask_user",
+            question="pause",
+            confidence=0.9,
+            risk="medium",
+            reason="test",
+            source="page",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "external_accounts": {
+                "portals": {
+                    "tenant.workdayjobs.com": {
+                        "status": "created",
+                        "email": "portal@example.com",
+                        "password": "portal-password",
+                        "credential_status": "verified",
+                    }
+                }
+            }
+        },
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "paused_for_user"
+
+
+async def test_run_external_apply_step_coerces_login_stop_ready_to_sign_in_click() -> None:
+    observation = PageObservation(
+        url="https://secure.workforceready.com.au/apply/login",
+        title="Sign In / Register - Job Candidate Account",
+        page_type="login",
+        fields=[
+            ObservedField(
+                element_id="field_username",
+                label="Username",
+                field_type="text",
+                required=True,
+                current_value="candidate@example.com",
+            ),
+            ObservedField(
+                element_id="field_password",
+                label="Password",
+                field_type="password",
+                required=True,
+                current_value="saved-password",
+            ),
+        ],
+        buttons=[
+            ObservedAction(element_id="button_signin", label="Sign In", kind="submit"),
+            ObservedAction(element_id="button_create", label="Create a new account", kind="submit"),
+        ],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        return ProposedAction(
+            action_type="stop_ready_to_submit",
+            confidence=0.99,
+            risk="low",
+            reason="Mistakenly treated Sign In as final submit.",
+            source="page",
+        )
+
+    executed: list[ProposedAction] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            navigated=True,
+            new_url="https://secure.workforceready.com.au/apply/profile",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        observe_fn=observe,
+        planner_fn=planner,
+        execute_fn=execute,
+    )
+
+    assert [action.action_type for action in executed] == ["click"]
+    assert executed[0].element_id == "button_signin"
+    assert state.status == "running"
+    assert state.submit_ready is False
+
+
+async def test_run_external_apply_step_passes_recent_executor_failure_diagnostics_to_planner() -> None:
+    observation = PageObservation(
+        url="https://secure.dc2.pageuppeople.com/apply/check",
+        page_type="form",
+        fields=[
+            ObservedField(
+                element_id="field_1",
+                label="Are you currently authorised to work in Australia?",
+                field_type="text",
+                current_value="Select",
+            )
+        ],
+    )
+    failed_trace = ActionTrace(
+        observation=observation,
+        proposed_action=ProposedAction(
+            action_type="select_option",
+            element_id="field_1",
+            value="Yes - I am a permanent resident / citizen",
+            confidence=0.99,
+            risk="low",
+            reason="Use work-rights profile fact.",
+            source="profile",
+        ),
+        policy_decision="allowed",
+        result=ActionResult(
+            ok=False,
+            action_type="select_option",
+            element_id="field_1",
+            message='No combobox option matching "Yes - I am a permanent resident / citizen"',
+            diagnostics={
+                "control_role": "combobox",
+                "requested_value": "Yes - I am a permanent resident / citizen",
+                "initial_options": [],
+                "visible_errors_before": ["Are you currently authorised to work in Australia? Yes - I am a permanent resident / citizen"],
+                "page_url_before": "https://secure.dc2.pageuppeople.com/apply/check",
+            },
+        ),
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        failures = kwargs["memory_context"]["recent_failures"]
+        assert failures[0]["action_type"] == "select_option"
+        assert failures[0]["field_label"] == "Are you currently authorised to work in Australia?"
+        assert failures[0]["diagnostics"]["control_role"] == "combobox"
+        assert failures[0]["diagnostics"]["requested_value"] == "Yes - I am a permanent resident / citizen"
+        assert "page_url_before" not in failures[0]["diagnostics"]
+        return ProposedAction(
+            action_type="ask_user",
+            question="pause",
+            confidence=0.9,
+            risk="medium",
+            reason="test",
+            source="page",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        recent_actions=[failed_trace],
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "paused_for_user"
+
+
+async def test_run_external_apply_step_feeds_question_cache_answers_to_planner() -> None:
+    cache = FakeQuestionCache(found="Yes")
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="screening_questions",
+            fields=[
+                ObservedField(
+                    element_id="field_rights",
+                    label="Do you have unrestricted work rights in Australia?",
+                    field_type="radio",
+                    required=True,
+                    options=["Yes", "No"],
+                    nearby_text="Do you have unrestricted work rights in Australia? Yes No",
+                )
+            ],
+        )
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        assert kwargs["memory_context"]["portal_host"] == "ats.example"
+        assert kwargs["planning_frame"]["phase"] == "screening"
+        assert any(
+            item.get("label") == "Do you have unrestricted work rights in Australia?"
+            and item.get("answer") == "Yes"
+            and item.get("source") == "question_answer_cache"
+            and item.get("portal_host") == "ats.example"
+            and item.get("options") == ["Yes", "No"]
+            and item.get("option_signature") == "yes|no"
+            and item.get("question_fingerprint")
+            for item in kwargs["approved_memory"]
+        )
+        return ProposedAction(
+            action_type="set_radio",
+            element_id="field_rights",
+            value="Yes",
+            confidence=0.95,
+            risk="medium",
+            reason="Use approved answer memory.",
+            source="memory",
+        )
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url="https://ats.example/apply",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        question_cache=cache,  # type: ignore[arg-type]
+        observe_fn=observe,
+        planner_fn=planner,
+        execute_fn=execute,
+    )
+
+    assert state.status == "running"
+    assert state.completed_actions[-1].proposed_action.source == "memory"
+
+
+async def test_run_external_apply_step_lets_planner_choose_manual_entry_on_profile_entry_choice_page() -> None:
+    observation = PageObservation(
+        url="https://secure.workforceready.com.au/apply",
+        page_type="unknown",
+        visible_text=(
+            "Apply for Job Principal Data Engineer Hello, let's start your application "
+            "What's the best way to get your info? Use my CV Type it in myself Applied here before? Log in"
+        ),
+        buttons=[
+            ObservedAction(element_id="button_cv", label="Use my CV", kind="button"),
+            ObservedAction(element_id="button_manual", label="Type it in myself", kind="button"),
+            ObservedAction(element_id="button_login", label="Log in", kind="submit"),
+        ],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    planner_observations: list[PageObservation] = []
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        planner_observations.append(kwargs["observation"])
+        return ProposedAction(
+            action_type="click",
+            element_id="button_manual",
+            confidence=0.92,
+            risk="medium",
+            reason="Planner chose manual entry over CV parsing for a more observable application flow.",
+            source="page",
+        )
+
+    def policy(**_kwargs: Any) -> PolicyDecision:
+        return PolicyDecision(decision="allowed", reason="safe")
+
+    executed: list[str | None] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action.element_id)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            navigated=True,
+            new_url="https://secure.workforceready.com.au/apply/manual",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        observe_fn=observe,
+        planner_fn=planner,
+        policy_fn=policy,
+        execute_fn=execute,
+    )
+
+    assert executed == ["button_manual"]
+    assert planner_observations == [observation]
+    assert state.status == "running"
+    assert state.completed_actions[-1].proposed_action.source == "page"
 
 
 async def test_apply_external_user_answers_records_generic_consent_approval() -> None:

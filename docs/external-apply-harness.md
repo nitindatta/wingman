@@ -106,13 +106,25 @@ This keeps stable provider-native flows fast while using the generic harness onl
 3. **Action tools**
    - Add narrow Playwright actions: fill text, select option, checkbox/radio, upload file, click.
    - Execute by `element_id`, not freeform selectors.
+   - Treat resume/CV upload as a planner-selected tool call: the harness supplies the configured file path, the planner chooses `upload_file`, the policy validates the target and path, and the browser executor performs the upload.
 
 4. **Planner**
-   - Call the LLM with page observation, profile facts, approved memory, recent action trace, and the allowed action schema.
+   - Call the LLM with page observation, a compact `PlanningFrame`, available profile facts, approved memory, recent action trace, and the allowed action schema.
    - Require exactly one proposed action.
+   - Keep the system prompt stable and generic; put situational guidance such as account recovery, manual-entry preference, upload availability, and blocked retries into structured JSON context.
+
+4C. **Memory context**
+   - Derive a compact `ExternalApplyMemoryContext` before each planner call.
+   - Include portal host, account mode, rejected saved-login state, create-account availability, rejected attempts, and concrete recommendations.
+   - Derive a `PlanningFrame` from the observation plus memory context before each planner call.
+   - Include phase, objective, strategies, hints, recommended actions, blocked actions, and safety notes in the LLM payload.
+   - Reuse approved external answers from `question_answer_cache` as planner `approved_memory`.
+   - Persist successful user-supplied external field answers back to `question_answer_cache` with source `human_external`.
+   - Keep recovery routing deterministic only where it prevents loops or unsafe repeats: if saved login was rejected and create-account/register is visible, choose account creation instead of retrying or asking for the same password again.
 
 5. **Policy gate**
    - Auto-allow low-risk profile-backed fields.
+   - Allow profile-backed resume uploads only when the target is an observed resume/CV file upload and the file path matches the configured `profile_facts.resume_path`.
    - Pause for salary, work rights ambiguity, legal declarations, diversity questions, low confidence, and final submit.
 
 6. **LangGraph integration**
@@ -131,6 +143,10 @@ This keeps stable provider-native flows fast while using the generic harness onl
 - The planner builds a JSON-only prompt, parses one `ProposedAction`, rejects unknown `element_id`s, and falls back conservatively when the LLM is unavailable.
 - Phase 4B is started in `agent/app/services/external_apply_harness.py`.
 - The harness can now observe a page, call the planner, and return `ExternalApplyState` without executing the proposed action.
+- Phase 4C is started with `ExternalApplyMemoryContext`.
+- The harness now summarizes portal/account state before planning, builds a structured `PlanningFrame`, injects cache-backed approved answers into external apply planning, saves successful user field answers to the shared question cache, and deterministically prefers create-account only when a saved portal login was rejected.
+- The planner prompt is now a stable generic contract; page-specific guidance is carried as JSON planning context instead of accumulating page-specific prose in the system prompt.
+- Planner-owned upload is in place: observations expose upload inputs, prompts describe `upload_file`, deterministic fallback handles obvious resume/CV inputs only, and policy blocks profile resume uploads to non-resume document fields or missing files.
 - Phase 5 is started in `agent/app/services/external_apply_policy.py`.
 - The policy gate returns `allowed`, `paused`, or `rejected` before any proposed browser action can execute.
 - Phase 6 is started with `run_external_apply_step(...)` in `agent/app/services/external_apply_harness.py`.

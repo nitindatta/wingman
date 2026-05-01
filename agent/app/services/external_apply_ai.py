@@ -9,15 +9,21 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.services.run_events import current_node as _current_node
+from app.services.run_events import current_run_id as _current_run_id
 from app.services.run_events import emit as _emit
 from app.settings import Settings
 from app.state.external_apply import ActionTrace, PageObservation, ProposedAction
 
 log = logging.getLogger("external_apply_ai")
+_TRANSCRIPT_LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "external_apply_llm.jsonl"
+_REDACTED = "[REDACTED]"
 
 _BROWSER_ACTIONS = {
     "fill_text",
@@ -52,6 +58,14 @@ _NAVIGATION_LABELS = re.compile(r"\b(continue|next|save and continue|proceed)\b"
 _LOGIN_LABELS = re.compile(r"\b(sign in|sign-in|log in|login)\b")
 _FINAL_SUBMIT_LABELS = re.compile(r"\b(submit|send application)\b")
 _FINAL_APPLY_LABELS = re.compile(r"\bapply now\b")
+_MANUAL_ENTRY_LABELS = re.compile(
+    r"\b(type it in myself|enter manually|manual entry|fill (?:it )?in myself|type manually)\b"
+)
+_RESUME_UPLOAD_LABELS = re.compile(r"\b(resume|resum[eé]|cv|curriculum vitae)\b")
+_SECRET_KEY_PATTERN = re.compile(
+    r"(?:^|_|\b)(password|passcode|passphrase|secret|token|otp|mfa|api[_-]?key|authorization)(?:$|_|\b)",
+    re.IGNORECASE,
+)
 
 
 def _build_client(settings: Settings) -> AsyncOpenAI:
@@ -68,6 +82,8 @@ async def propose_external_apply_action(
     profile_facts: dict[str, Any] | None = None,
     approved_memory: list[dict[str, Any]] | None = None,
     recent_actions: list[ActionTrace] | None = None,
+    memory_context: dict[str, Any] | None = None,
+    planning_frame: dict[str, Any] | None = None,
 ) -> ProposedAction:
     """Return one proposed action for the current external apply page."""
 
@@ -77,6 +93,8 @@ async def propose_external_apply_action(
         profile_facts=profile_facts or {},
         approved_memory=approved_memory or [],
         recent_actions=recent_actions or [],
+        memory_context=memory_context or {},
+        planning_frame=planning_frame or {},
     )
     _emit("llm_prompt", f"plan action: {observation.page_type} @ {observation.url[:60]}", {
         "call": "propose_action",
@@ -101,6 +119,15 @@ async def propose_external_apply_action(
         )
         raw = response.choices[0].message.content or "{}"
         action = parse_planner_response(raw, observation)
+        _append_external_apply_llm_transcript(
+            call="propose_action",
+            model=settings.openai_model,
+            observation=observation,
+            system=system,
+            user=user,
+            raw_response=raw,
+            parsed_response=action.model_dump(),
+        )
         _emit("llm_response", f"planned: {action.action_type}", {
             "call": "propose_action",
             "raw": raw[:400],
@@ -125,6 +152,8 @@ async def propose_external_apply_actions(
     profile_facts: dict[str, Any] | None = None,
     approved_memory: list[dict[str, Any]] | None = None,
     recent_actions: list[ActionTrace] | None = None,
+    memory_context: dict[str, Any] | None = None,
+    planning_frame: dict[str, Any] | None = None,
 ) -> list[ProposedAction]:
     """Return a page-level action plan for the current external apply page."""
 
@@ -134,6 +163,8 @@ async def propose_external_apply_actions(
         profile_facts=profile_facts or {},
         approved_memory=approved_memory or [],
         recent_actions=recent_actions or [],
+        memory_context=memory_context or {},
+        planning_frame=planning_frame or {},
     )
     _emit("llm_prompt", f"batch plan: {observation.page_type} @ {observation.url[:60]}", {
         "call": "batch_plan",
@@ -158,6 +189,15 @@ async def propose_external_apply_actions(
         )
         raw = response.choices[0].message.content or "{}"
         actions = parse_planner_batch_response(raw, observation)
+        _append_external_apply_llm_transcript(
+            call="batch_plan",
+            model=settings.openai_model,
+            observation=observation,
+            system=system,
+            user=user,
+            raw_response=raw,
+            parsed_response={"actions": [action.model_dump() for action in actions]},
+        )
         _emit("llm_response", f"batch plan: {len(actions)} actions", {
             "call": "batch_plan",
             "raw": raw[:600],
@@ -179,23 +219,19 @@ def build_external_apply_planner_messages(
     profile_facts: dict[str, Any],
     approved_memory: list[dict[str, Any]],
     recent_actions: list[ActionTrace],
+    memory_context: dict[str, Any] | None = None,
+    planning_frame: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     system = (
         "You are Envoy's external apply planning agent. "
-        "You do not operate the browser. You propose exactly one next action as JSON. "
-        "Use only observed element_id values from the page. "
-        "Prefer safe, reversible actions using approved profile or memory facts. "
-        "Do not fill job-search, keyword, classification, or location search fields; those are not application answers. "
-        "For contact fields such as email, phone, name, or LinkedIn, only use exact values present in profile_facts. "
-        "For external account creation/login fields such as email and password, use exact values from "
-        "profile_facts.external_accounts.default when present. "
-        "For resume/CV file inputs, use profile_facts.resume_path when it is present. "
-        "Standard required privacy/data-handling consent checkboxes may be checked automatically. "
-        "If the page mentions a required field or checkbox in an error message but no matching observed element_id exists, "
-        "use ask_user instead of stop_failed so the workflow can pause for help. "
-        "If the page asks for salary, visa/work-rights ambiguity, diversity, legal declarations, "
-        "background checks, captcha, or anything uncertain, use ask_user. "
-        "Never submit the final application; use stop_ready_to_submit when a final submit/apply button is reached. "
+        "You do not operate the browser. You propose exactly one next browser action as JSON. "
+        "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
+        "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
+        "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
+        "Ask the user when required information is missing, judgement-based, sensitive, or ambiguous. "
+        "When asking the user, ask for exactly one observed field per ask_user action; do not bundle multiple fields "
+        "or multiple answers into one question. "
+        "Never final-submit; return stop_ready_to_submit at the final submission gate. "
         "Return ONLY valid JSON with this shape: "
         "{\"action_type\":\"fill_text|select_option|set_checkbox|set_radio|upload_file|click|ask_user|stop_ready_to_submit|stop_failed\","
         "\"element_id\":\"... or null\",\"value\":\"... or null\",\"question\":\"... or null\","
@@ -204,12 +240,14 @@ def build_external_apply_planner_messages(
     )
     payload = {
         "page": _observation_for_prompt(observation),
-        "profile_facts": profile_facts,
+        "planning_frame": planning_frame or {},
+        "available_facts": _available_facts_for_prompt(profile_facts),
+        "memory_context": memory_context or {},
         "approved_memory": approved_memory[:12],
         "recent_actions": [_trace_for_prompt(trace) for trace in recent_actions[-6:]],
         "allowed_actions": sorted(_ALL_ACTIONS),
     }
-    user = json.dumps(payload, ensure_ascii=False, indent=2)
+    user = json.dumps(_redact_prompt_value(payload), ensure_ascii=False, indent=2)
     return system, user
 
 
@@ -219,29 +257,22 @@ def build_external_apply_batch_planner_messages(
     profile_facts: dict[str, Any],
     approved_memory: list[dict[str, Any]],
     recent_actions: list[ActionTrace],
+    memory_context: dict[str, Any] | None = None,
+    planning_frame: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     system = (
         "You are Envoy's external apply planning agent. "
         "You do not operate the browser. You propose a page plan as JSON. "
-        "Use only observed element_id values from the page. "
-        "For profile/contact pages, include every safe fill/select/check action that can be answered from "
-        "approved profile_facts or approved_memory so the harness can fill the page in one pass. "
-        "Skip fields that already have a useful current_value. "
-        "If any fields on the current page need user judgement or missing private data, include safe earlier fill actions first, "
-        "then include one ask_user action for each uncertain field on that same page and stop the plan there. "
-        "Do not include a navigation click after fill actions; the harness will pause and re-observe after filling. "
-        "Only propose a click when there are no safe field actions left on the current page. "
-        "Do not fill job-search, keyword, classification, or location search fields; those are not application answers. "
-        "For contact fields such as email, phone, name, or LinkedIn, only use exact values present in profile_facts. "
-        "For external account creation/login fields such as email and password, use exact values from "
-        "profile_facts.external_accounts.default when present. "
-        "For resume/CV file inputs, use profile_facts.resume_path when it is present. "
-        "Standard required privacy/data-handling consent checkboxes may be checked automatically. "
-        "If the page mentions a required field or checkbox in an error message but no matching observed element_id exists, "
-        "use ask_user instead of stop_failed so the workflow can pause for help. "
-        "If the page asks for salary, visa/work-rights ambiguity, diversity, legal declarations, "
-        "background checks, captcha, or anything uncertain, use ask_user. "
-        "Never submit the final application; use stop_ready_to_submit when a final submit/apply button is reached. "
+        "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
+        "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
+        "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
+        "Prefer safe field actions before navigation, skip fields that already have useful current_value, "
+        "and ask the user for required information that is missing, judgement-based, sensitive, or ambiguous. "
+        "When asking the user, ask for exactly one observed field per ask_user action; return multiple ask_user "
+        "actions when multiple fields need user input, and do not bundle multiple answers into one question. "
+        "Do not include click, stop_ready_to_submit, or stop_failed after field actions in the same page plan; "
+        "the harness will re-observe after field changes. "
+        "Never final-submit; return stop_ready_to_submit at the final submission gate. "
         "Return ONLY valid JSON with this shape: "
         "{\"actions\":[{\"action_type\":\"fill_text|select_option|set_checkbox|set_radio|upload_file|click|ask_user|stop_ready_to_submit|stop_failed\","
         "\"element_id\":\"... or null\",\"value\":\"... or null\",\"question\":\"... or null\","
@@ -251,12 +282,14 @@ def build_external_apply_batch_planner_messages(
     )
     payload = {
         "page": _observation_for_prompt(observation),
-        "profile_facts": profile_facts,
+        "planning_frame": planning_frame or {},
+        "available_facts": _available_facts_for_prompt(profile_facts),
+        "memory_context": memory_context or {},
         "approved_memory": approved_memory[:12],
         "recent_actions": [_trace_for_prompt(trace) for trace in recent_actions[-8:]],
         "allowed_actions": sorted(_ALL_ACTIONS),
     }
-    user = json.dumps(payload, ensure_ascii=False, indent=2)
+    user = json.dumps(_redact_prompt_value(payload), ensure_ascii=False, indent=2)
     return system, user
 
 
@@ -477,10 +510,115 @@ def _observation_for_prompt(observation: PageObservation) -> dict[str, Any]:
         "page_type": observation.page_type,
         "visible_text_excerpt": observation.visible_text[:2500],
         "fields": [field.model_dump() for field in observation.fields[:30]],
+        "uploads": [field.model_dump() for field in observation.uploads[:10]],
         "buttons": [button.model_dump() for button in observation.buttons[:20]],
         "links": [link.model_dump() for link in observation.links[:12]],
         "errors": observation.errors[:10],
     }
+
+
+def _available_facts_for_prompt(profile_facts: dict[str, Any]) -> dict[str, Any]:
+    allowed_top_level = {
+        "name",
+        "full_name",
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "linkedin_url",
+        "location",
+        "city",
+        "contact",
+        "address",
+        "employment_history",
+        "external_accounts",
+        "resume_path",
+    }
+    return {
+        key: value
+        for key, value in profile_facts.items()
+        if key in allowed_top_level and value not in (None, "", [], {})
+    }
+
+
+def _redact_prompt_value(value: Any, *, key_path: str = "") -> Any:
+    if isinstance(value, dict):
+        has_secret_context = _dict_has_secret_context(value)
+        redacted: dict[str, Any] = {}
+        for key, child in value.items():
+            child_path = f"{key_path}.{key}" if key_path else str(key)
+            if _is_secret_key(str(key)):
+                continue
+            if has_secret_context and str(key) in {"answer", "current_value", "value", "value_after"}:
+                redacted[str(key)] = _REDACTED
+                continue
+            child_value = _redact_prompt_value(child, key_path=child_path)
+            if child_value not in (None, "", [], {}):
+                redacted[str(key)] = child_value
+        return redacted
+    if isinstance(value, list):
+        return [_redact_prompt_value(item, key_path=key_path) for item in value]
+    return value
+
+
+def _is_secret_key(key: str) -> bool:
+    return bool(_SECRET_KEY_PATTERN.search(key))
+
+
+def _dict_has_secret_context(value: dict[str, Any]) -> bool:
+    context = " ".join(
+        str(value.get(key, ""))
+        for key in ("element_id", "field_id", "id", "label", "question", "name", "nearby_text")
+    )
+    return bool(_SECRET_KEY_PATTERN.search(context))
+
+
+def _append_external_apply_llm_transcript(
+    *,
+    call: str,
+    model: str,
+    observation: PageObservation,
+    system: str,
+    user: str,
+    raw_response: str,
+    parsed_response: dict[str, Any],
+) -> None:
+    try:
+        _TRANSCRIPT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "run_id": _current_run_id(),
+            "node": _current_node(),
+            "call": call,
+            "model": model,
+            "page": {
+                "url": observation.url,
+                "title": observation.title,
+                "page_type": observation.page_type,
+                "fields_count": len(observation.fields),
+                "buttons_count": len(observation.buttons),
+            },
+            "request": {
+                "system": system,
+                "user": _redact_json_text(user),
+            },
+            "response": {
+                "raw": _redact_json_text(raw_response),
+                "parsed": _redact_prompt_value(parsed_response),
+            },
+        }
+        with _TRANSCRIPT_LOG_PATH.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as exc:  # pragma: no cover - transcript logging must not break planning
+        log.warning("[external_apply_ai] failed to write LLM transcript: %s", exc)
+
+
+def _redact_json_text(text: str) -> str:
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    return json.dumps(_redact_prompt_value(parsed), ensure_ascii=False, indent=2)
 
 
 def _trace_for_prompt(trace: ActionTrace) -> dict[str, Any]:
@@ -585,6 +723,8 @@ def _navigation_action_score(action: Any, observation: PageObservation) -> int:
 
     if _NONFINAL_APPLY_LABELS.search(label):
         score = 100
+    elif _MANUAL_ENTRY_LABELS.search(label):
+        score = 95
     elif _ACCOUNT_CREATION_LABELS.search(label):
         score = 90
     elif _NAVIGATION_LABELS.search(label):
@@ -603,6 +743,10 @@ def _navigation_action_score(action: Any, observation: PageObservation) -> int:
     if observation.page_type == "unknown" and _NONFINAL_APPLY_LABELS.search(label):
         score += 5
     return score
+
+
+def _looks_like_resume_upload_label(label: str) -> bool:
+    return bool(_RESUME_UPLOAD_LABELS.search(label.lower()))
 
 
 def _looks_like_job_search_page(observation: PageObservation) -> bool:
@@ -624,7 +768,7 @@ def _lookup_safe_value(
     approved_memory: list[dict[str, Any]],
 ) -> tuple[str | None, str]:
     label_lower = label.lower()
-    if field_type == "file" or re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", label_lower):
+    if _looks_like_resume_upload_label(label_lower):
         value = _profile_path_value(profile_facts, "resume_path")
         if value:
             return str(value), "profile"

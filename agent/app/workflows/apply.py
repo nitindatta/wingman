@@ -457,6 +457,7 @@ def build_apply_graph(
                 application_id=state.application_id,
                 profile_facts=profile,
                 recent_actions=recent_actions,
+                question_cache=question_cache,
             )
             active_session_key = state.session_key
         except (BrowserToolError, ToolServiceError) as exc:
@@ -490,6 +491,7 @@ def build_apply_graph(
                     application_id=state.application_id,
                     profile_facts=profile,
                     recent_actions=[],
+                    question_cache=question_cache,
                 )
             except (BrowserToolError, ToolServiceError) as recovery_exc:
                 log.error("[external_apply] recovered session still failed: %s", recovery_exc)
@@ -585,6 +587,7 @@ def build_apply_graph(
                     external_state=external_state,
                     answers_by_element_id=external_answers,
                     answers_by_question_key=external_question_answers,
+                    question_cache=question_cache,
                 )
             except (BrowserToolError, ToolServiceError) as exc:
                 if not is_session_lost_browser_error(exc):
@@ -612,6 +615,7 @@ def build_apply_graph(
                     external_state=realigned_state,
                     answers_by_element_id=external_answers,
                     answers_by_question_key=external_question_answers,
+                    question_cache=question_cache,
                 )
                 active_session_key = recovered.session_key
             next_state = state.model_copy(update={"external_apply": external_state})
@@ -1002,7 +1006,23 @@ def build_apply_graph(
             "workflow_run_id": state.workflow_run_id,
         })
 
-        if state.session_key:
+        keep_failed_external_session = (
+            state.status == "failed"
+            and state.external_apply is not None
+            and state.session_key
+        )
+        if keep_failed_external_session:
+            log.warning(
+                "[finish] preserving browser session for failed external apply: session_key=%s",
+                state.session_key,
+            )
+            ev("node", "finish: preserving browser session for failed external apply", {
+                "session_key": state.session_key,
+                "application_id": state.application_id,
+                "workflow_run_id": state.workflow_run_id,
+                "error": state.error,
+            })
+        elif state.session_key:
             await close_session(tool_client, state.session_key)
             await session_repo.close(state.session_key)
             log.debug("[finish] closed session_key=%s", state.session_key)

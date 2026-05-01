@@ -1,6 +1,9 @@
+import json
+
 import pytest
 
 from app.services.external_apply_ai import (
+    _append_external_apply_llm_transcript,
     build_external_apply_batch_planner_messages,
     build_external_apply_planner_messages,
     fallback_proposed_action,
@@ -8,7 +11,7 @@ from app.services.external_apply_ai import (
     parse_planner_batch_response,
     parse_planner_response,
 )
-from app.state.external_apply import ObservedAction, ObservedField, PageObservation
+from app.state.external_apply import ActionResult, ActionTrace, ObservedAction, ObservedField, PageObservation, ProposedAction
 
 
 def test_parse_planner_response_accepts_known_observed_element() -> None:
@@ -237,6 +240,39 @@ def test_fallback_uploads_resume_from_profile_facts() -> None:
     assert action.source == "profile"
 
 
+def test_batch_fallback_does_not_use_resume_for_non_resume_file_upload() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[ObservedField(element_id="field_cover", label="Cover letter", field_type="file", required=True)],
+    )
+
+    actions = fallback_proposed_actions(
+        observation,
+        {"resume_path": "C:/workspace/profile/example_resume.docx"},
+        [],
+    )
+
+    assert actions[0].action_type == "ask_user"
+    assert actions[0].element_id == "field_cover"
+
+
+def test_fallback_prefers_manual_entry_on_profile_entry_choice_page() -> None:
+    observation = PageObservation(
+        url="https://secure.workforceready.com.au/apply",
+        page_type="unknown",
+        visible_text="What's the best way to get your info? Use my CV Type it in myself",
+        buttons=[
+            ObservedAction(element_id="button_cv", label="Use my CV", kind="button"),
+            ObservedAction(element_id="button_manual", label="Type it in myself", kind="button"),
+        ],
+    )
+
+    action = fallback_proposed_action(observation, {}, [])
+
+    assert action.action_type == "click"
+    assert action.element_id == "button_manual"
+
+
 def test_fallback_asks_user_on_job_search_page() -> None:
     observation = PageObservation(
         url="https://hk.jobsdb.com/",
@@ -340,9 +376,152 @@ def test_prompt_includes_allowed_actions_and_observation() -> None:
         recent_actions=[],
     )
 
-    assert "propose exactly one next action" in system
-    assert "fill_text" in user
-    assert "field_1" in user
+    payload = json.loads(user)
+
+    assert "propose exactly one next browser action" in system
+    assert "fill_text" in payload["allowed_actions"]
+    assert payload["page"]["fields"][0]["element_id"] == "field_1"
+    assert payload["available_facts"]["name"] == "Nitin Datta"
+
+
+def test_prompt_redacts_external_account_password() -> None:
+    observation = PageObservation(
+        url="https://ats.example/login",
+        title="Login",
+        fields=[ObservedField(element_id="field_password", label="Password", field_type="password")],
+    )
+
+    _, user = build_external_apply_batch_planner_messages(
+        observation=observation,
+        profile_facts={
+            "external_accounts": {
+                "default": {
+                    "email": "nitin@example.com",
+                    "password": "Sunshine@123#5",
+                    "working_rights": "Permanent Resident",
+                }
+            }
+        },
+        approved_memory=[],
+        recent_actions=[],
+    )
+    payload = json.loads(user)
+
+    assert "Sunshine@123#5" not in user
+    assert "password" not in payload["available_facts"]["external_accounts"]["default"]
+    assert payload["available_facts"]["external_accounts"]["default"]["email"] == "nitin@example.com"
+    assert payload["available_facts"]["external_accounts"]["default"]["working_rights"] == "Permanent Resident"
+
+
+def test_prompt_redacts_password_values_from_recent_actions() -> None:
+    observation = PageObservation(url="https://ats.example/login")
+    trace = ActionTrace(
+        observation=observation,
+        proposed_action=ProposedAction(
+            action_type="fill_text",
+            element_id="field_password",
+            value="Sunshine@123#5",
+            confidence=0.99,
+            risk="low",
+            reason="Fill saved password.",
+            source="profile",
+        ),
+        policy_decision="allowed",
+        result=ActionResult(
+            ok=True,
+            action_type="fill_text",
+            element_id="field_password",
+            value_after="Sunshine@123#5",
+        ),
+    )
+
+    _, user = build_external_apply_batch_planner_messages(
+        observation=observation,
+        profile_facts={},
+        approved_memory=[],
+        recent_actions=[trace],
+    )
+    payload = json.loads(user)
+    recent = payload["recent_actions"][0]
+
+    assert "Sunshine@123#5" not in user
+    assert recent["action"]["value"] == "[REDACTED]"
+    assert recent["result"]["value_after"] == "[REDACTED]"
+
+
+def test_external_apply_llm_transcript_log_writes_full_redacted_record(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "external_apply_llm.jsonl"
+    monkeypatch.setattr("app.services.external_apply_ai._TRANSCRIPT_LOG_PATH", log_path)
+    observation = PageObservation(
+        url="https://ats.example/login",
+        title="Login",
+        page_type="login",
+        fields=[ObservedField(element_id="field_password", label="Password", field_type="password")],
+    )
+
+    _append_external_apply_llm_transcript(
+        call="batch_plan",
+        model="gpt-test",
+        observation=observation,
+        system="system prompt",
+        user=json.dumps(
+            {
+                "available_facts": {
+                    "external_accounts": {"default": {"email": "nitin@example.com", "password": "Sunshine@123#5"}}
+                }
+            }
+        ),
+        raw_response=json.dumps({"actions": [{"element_id": "field_password", "value": "Sunshine@123#5"}]}),
+        parsed_response={"actions": [{"element_id": "field_password", "value": "Sunshine@123#5"}]},
+    )
+
+    record = json.loads(log_path.read_text(encoding="utf-8"))
+
+    assert record["call"] == "batch_plan"
+    assert record["request"]["system"] == "system prompt"
+    assert "Sunshine@123#5" not in log_path.read_text(encoding="utf-8")
+    assert "password" not in json.loads(record["request"]["user"])["available_facts"]["external_accounts"]["default"]
+    assert json.loads(record["response"]["raw"])["actions"][0]["value"] == "[REDACTED]"
+    assert record["response"]["parsed"]["actions"][0]["value"] == "[REDACTED]"
+
+
+def test_prompt_includes_memory_context() -> None:
+    observation = PageObservation(
+        url="https://secure.workforceready.com.au/apply/login",
+        page_type="login",
+        buttons=[ObservedAction(element_id="button_create", label="Create a new account")],
+    )
+
+    system, user = build_external_apply_planner_messages(
+        observation=observation,
+        profile_facts={},
+        approved_memory=[],
+        recent_actions=[],
+        memory_context={
+            "portal_host": "secure.workforceready.com.au",
+            "saved_login_rejected": True,
+            "create_account_available": True,
+            "recommendations": ["Prefer create-account."],
+        },
+        planning_frame={
+            "phase": "account_recovery",
+            "recommended_actions": [
+                {
+                    "action_type": "click",
+                    "element_id": "button_create",
+                    "reason": "Saved login was rejected and create account is visible.",
+                }
+            ],
+            "blocked_actions": ["retry_rejected_default_password"],
+        },
+    )
+    payload = json.loads(user)
+
+    assert "planning_frame strategies" in system
+    assert payload["memory_context"]["portal_host"] == "secure.workforceready.com.au"
+    assert payload["memory_context"]["saved_login_rejected"] is True
+    assert payload["planning_frame"]["phase"] == "account_recovery"
+    assert payload["planning_frame"]["recommended_actions"][0]["element_id"] == "button_create"
 
 
 def test_batch_prompt_asks_for_multiple_safe_field_actions() -> None:
@@ -362,6 +541,9 @@ def test_batch_prompt_asks_for_multiple_safe_field_actions() -> None:
         recent_actions=[],
     )
 
+    payload = json.loads(user)
+
     assert "propose a page plan" in system
     assert "\"actions\"" in system
-    assert "field_1" in user
+    assert payload["page"]["fields"][0]["element_id"] == "field_1"
+    assert payload["available_facts"]["first_name"] == "Nitin"

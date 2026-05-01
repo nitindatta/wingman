@@ -143,6 +143,57 @@ describe('collectExternalApplyObservation', () => {
     expect(observation.fields[0]?.required).toBe(true);
   });
 
+  it('extracts hidden PageUp-style combobox options from an owned listbox', () => {
+    const observation = withDom(
+      `
+      <html>
+        <body>
+          <div class="input-group cb pu-select">
+            <label for="q9574">Do you have working rights in Australia? *</label>
+            <input
+              id="q9574"
+              role="combobox"
+              aria-controls="q9574-list"
+              aria-owns="q9574-list"
+              aria-required="true"
+              data-envoy-apply-id="field_1"
+              value=""
+            />
+            <button id="q9574-button" aria-controls="q9574-list">Open</button>
+            <input type="hidden" id="q9574-postback" name="q9574" />
+            <ul id="q9574-list" role="listbox" style="display:none">
+              <li role="option" data-value="">Select</li>
+              <li role="option" data-value="Yes - I am a permanent resident / citizen||28682|">
+                Yes - I am a permanent resident / citizen
+              </li>
+              <li role="option" data-value="Yes - I have a current work permit / visa||28683|">
+                Yes - I have a current work permit / visa
+              </li>
+              <li role="option" data-value="No - I require sponsorship||28684|">
+                No - I require sponsorship
+              </li>
+            </ul>
+          </div>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.fields).toHaveLength(1);
+    expect(observation.fields[0]?.element_id).toBe('field_1');
+    expect(observation.fields[0]?.label).toBe('Do you have working rights in Australia? *');
+    expect(observation.fields[0]?.field_type).toBe('select');
+    expect(observation.fields[0]?.control_kind).toBe('aria_combobox');
+    expect(observation.fields[0]?.required).toBe(true);
+    expect(observation.fields[0]?.options).toEqual([
+      'Select',
+      'Yes - I am a permanent resident / citizen',
+      'Yes - I have a current work permit / visa',
+      'No - I require sponsorship',
+    ]);
+  });
+
   it('observes button-based listbox controls as select fields', () => {
     const observation = withDom(
       `

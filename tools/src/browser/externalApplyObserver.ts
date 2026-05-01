@@ -196,6 +196,55 @@ export function collectExternalApplyObservation(): PageObservation {
       160,
     );
 
+  const optionLabelForListboxOption = (el: Element): string => {
+    const dataValue = cleanText(el.getAttribute('data-value'), 240);
+    const dataValueLabel = cleanText((dataValue.split('||')[0] ?? dataValue), 160);
+    return optionLabelForElement(el) || dataValueLabel;
+  };
+
+  const controlledListboxesFor = (el: Element): HTMLElement[] => {
+    const listboxes: HTMLElement[] = [];
+    const add = (candidate: Element | null | undefined): void => {
+      if (!(candidate instanceof window.HTMLElement)) return;
+      if (!candidate.matches('[role="listbox"], ul, ol, [data-value]')) return;
+      if (!listboxes.includes(candidate)) listboxes.push(candidate);
+    };
+    const addByIds = (ids: string | null): void => {
+      (ids ?? '')
+        .split(/\s+/)
+        .map((id) => id.trim())
+        .filter(Boolean)
+        .forEach((id) => add(document.getElementById(id)));
+    };
+
+    addByIds(el.getAttribute('aria-controls'));
+    addByIds(el.getAttribute('aria-owns'));
+    const trigger = el.closest('[aria-controls], [aria-owns]') ?? el.parentElement?.querySelector('[aria-controls], [aria-owns]');
+    if (trigger && trigger !== el) {
+      addByIds(trigger.getAttribute('aria-controls'));
+      addByIds(trigger.getAttribute('aria-owns'));
+    }
+
+    const container = nearestContainer(el);
+    container.querySelectorAll<HTMLElement>('[role="listbox"], ul[id], ol[id]').forEach(add);
+    let sibling = el.nextElementSibling;
+    while (sibling) {
+      add(sibling);
+      sibling.querySelectorAll<HTMLElement>('[role="listbox"], ul[id], ol[id]').forEach(add);
+      sibling = sibling.nextElementSibling;
+    }
+    return listboxes;
+  };
+
+  const listboxOptionsForControl = (el: Element): string[] => {
+    const options = controlledListboxesFor(el).flatMap((listbox) =>
+      Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"], li, [data-value]'))
+        .map(optionLabelForListboxOption)
+        .filter(Boolean),
+    );
+    return Array.from(new Set(options));
+  };
+
   const requiredFor = (input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement): boolean => {
     const nearby = textNear(input, 180).toLowerCase();
     return input.required || input.getAttribute('aria-required') === 'true' || nearby.includes('required') || /\*\s*$/.test(labelForInput(input));
@@ -267,6 +316,7 @@ export function collectExternalApplyObservation(): PageObservation {
   for (const input of inputs) {
     if (!isObservableInput(input)) continue;
     if (isSelectPromptInput(input)) continue;
+    if ((input.getAttribute('role') ?? '').toLowerCase() === 'combobox') continue;
     const type = fieldTypeFor(input);
 
     if (type === 'radio') {
@@ -384,29 +434,33 @@ export function collectExternalApplyObservation(): PageObservation {
     if (!isVisible(combobox)) continue;
     const existingId = combobox.getAttribute('data-envoy-apply-id');
     if (existingId && fields.some((field) => field.element_id === existingId)) continue;
-    const listboxId = combobox.getAttribute('aria-controls') || combobox.getAttribute('aria-owns') || '';
-    const listbox = listboxId ? document.getElementById(listboxId) : null;
-    const options = listbox
-      ? Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"], li, [data-value]'))
-        .map(optionLabelForElement)
-        .filter(Boolean)
-      : [];
+    const options = listboxOptionsForControl(combobox);
+    const inputValue = combobox instanceof window.HTMLInputElement
+      || combobox instanceof window.HTMLTextAreaElement
+      || combobox instanceof window.HTMLSelectElement
+      ? combobox.value
+      : '';
     const currentValue = cleanText(
       combobox.getAttribute('aria-valuetext')
-      || combobox.getAttribute('aria-label')
+      || inputValue
       || combobox.textContent
       || '',
       160,
     );
     const label = labelForElement(combobox);
     const validation = validationStateFor(combobox, label);
+    const required = combobox instanceof window.HTMLInputElement
+      || combobox instanceof window.HTMLTextAreaElement
+      || combobox instanceof window.HTMLSelectElement
+      ? requiredFor(combobox)
+      : requiredForElement(combobox);
     fields.push({
       element_id: assignElementId(combobox, 'field'),
       label,
       field_type: 'select',
       control_kind: 'aria_combobox',
-      required: requiredForElement(combobox),
-      current_value: currentValue || null,
+      required,
+      current_value: normalizedSelectValue(currentValue),
       options,
       nearby_text: textNear(combobox),
       disabled: combobox.getAttribute('aria-disabled') === 'true' || combobox.hasAttribute('disabled'),
@@ -424,13 +478,7 @@ export function collectExternalApplyObservation(): PageObservation {
     if (!explicitLabelFor(control) && !labelledByText(control)) continue;
     const existingId = control.getAttribute('data-envoy-apply-id');
     if (existingId && fields.some((field) => field.element_id === existingId)) continue;
-    const listboxId = control.getAttribute('aria-controls') || control.getAttribute('aria-owns') || '';
-    const listbox = listboxId ? document.getElementById(listboxId) : null;
-    const options = listbox
-      ? Array.from(listbox.querySelectorAll<HTMLElement>('[role="option"], li, [data-value]'))
-        .map(optionLabelForElement)
-        .filter(Boolean)
-      : [];
+    const options = listboxOptionsForControl(control);
     const label = labelForElement(control);
     const validation = validationStateFor(control, label);
     fields.push({

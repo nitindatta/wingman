@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import re
 from typing import Any
 
@@ -108,7 +109,11 @@ def validate_external_apply_action(
             risk_flags=["low_confidence"],
         )
 
-    if proposed_action.risk == "high":
+    if proposed_action.risk == "high" and not _approved_external_account_secret_action(
+        proposed_action,
+        target_field,
+        profile_facts or {},
+    ):
         return PolicyDecision(
             decision="paused",
             reason="High-risk actions require user approval.",
@@ -176,7 +181,15 @@ def validate_external_apply_action(
                 reason=f"{action_type} requires a non-empty value.",
                 risk_flags=["missing_value"],
             )
-        if proposed_action.source == "profile" and target_field:
+        if action_type == "upload_file":
+            upload_decision = _validate_upload_file_action(
+                target_field,
+                proposed_action,
+                profile_facts or {},
+            )
+            if upload_decision is not None:
+                return upload_decision
+        if proposed_action.source == "profile" and target_field and action_type != "upload_file":
             expected_values = _profile_values_for_field(target_field, profile_facts or {})
             if expected_values and not _matches_any_expected_value(proposed_action.value, expected_values):
                 return PolicyDecision(
@@ -200,6 +213,60 @@ def validate_external_apply_action(
         reason="Action passed deterministic policy checks.",
         risk_flags=[],
     )
+
+
+def _approved_external_account_secret_action(
+    proposed_action: ProposedAction,
+    target_field: ObservedField | None,
+    profile_facts: dict[str, Any],
+) -> bool:
+    if proposed_action.action_type != "fill_text" or target_field is None:
+        return False
+    if proposed_action.source != "profile" or not proposed_action.value:
+        return False
+    label = " ".join([target_field.label, target_field.field_type, target_field.nearby_text]).lower()
+    if not re.search(r"\b(pass(word|code|phrase)?)\b", label):
+        return False
+    expected_values = _profile_values_for_field(target_field, profile_facts)
+    return bool(expected_values and _matches_any_expected_value(proposed_action.value, expected_values))
+
+
+def _validate_upload_file_action(
+    target_field: ObservedField,
+    proposed_action: ProposedAction,
+    profile_facts: dict[str, Any],
+) -> PolicyDecision | None:
+    if not _is_file_upload_field(target_field):
+        return PolicyDecision(
+            decision="rejected",
+            reason="upload_file may only target an observed file upload field.",
+            risk_flags=["non_file_upload_target"],
+        )
+    if not proposed_action.value or not Path(proposed_action.value).exists():
+        return PolicyDecision(
+            decision="paused",
+            reason="The planned upload file does not exist on disk.",
+            pause_reason="needs_user_input",
+            risk_flags=["upload_file_missing"],
+        )
+    if proposed_action.source != "profile":
+        return None
+    if not _looks_like_resume_upload_field(target_field):
+        return PolicyDecision(
+            decision="paused",
+            reason="The configured profile resume may only be uploaded to observed resume/CV fields.",
+            pause_reason="needs_approval",
+            risk_flags=["profile_resume_target_mismatch"],
+        )
+    expected_values = _profile_values(profile_facts, ["resume_path"])
+    if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
+        return PolicyDecision(
+            decision="paused",
+            reason="Planner claimed a profile resume upload, but the file does not match profile_facts.resume_path.",
+            pause_reason="needs_approval",
+            risk_flags=["profile_value_mismatch"],
+        )
+    return None
 
 
 def _target_text(observation: PageObservation, element_id: str) -> str | None:
@@ -341,6 +408,18 @@ def _looks_like_job_search_field(observation: PageObservation, field: ObservedFi
     )
 
 
+def _is_file_upload_field(field: ObservedField) -> bool:
+    return (
+        field.field_type.strip().lower() == "file"
+        or field.control_kind == "file_upload"
+    )
+
+
+def _looks_like_resume_upload_field(field: ObservedField) -> bool:
+    label = " ".join([field.label, field.nearby_text]).lower()
+    return bool(re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", label))
+
+
 def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any]) -> list[str]:
     label = " ".join([field.label, field.field_type, field.nearby_text]).lower()
     if "email" in label or "e-mail" in label:
@@ -360,7 +439,7 @@ def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any
         return _profile_values(profile_facts, ["phone", "contact.phone"])
     if "linkedin" in label:
         return _profile_values(profile_facts, ["linkedin_url", "contact.linkedin", "contact.linkedin_url"])
-    if field.field_type == "file" or re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", label):
+    if _looks_like_resume_upload_field(field):
         return _profile_values(profile_facts, ["resume_path"])
     if "full name" in label or label.strip() in {"name", "your name"}:
         return _profile_values(profile_facts, ["name", "full_name"])
@@ -478,6 +557,20 @@ def _normalize_org_name(value: str) -> str:
 def _matches_any_expected_value(value: str, expected_values: list[str]) -> bool:
     normalized_value = _normalize_profile_value(value)
     return any(normalized_value == _normalize_profile_value(expected) for expected in expected_values)
+
+
+def _matches_any_expected_path(value: str, expected_values: list[str]) -> bool:
+    try:
+        normalized_value = Path(value).resolve()
+    except OSError:
+        return _matches_any_expected_value(value, expected_values)
+    for expected in expected_values:
+        try:
+            if normalized_value == Path(expected).resolve():
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _normalize_profile_value(value: str) -> str:
