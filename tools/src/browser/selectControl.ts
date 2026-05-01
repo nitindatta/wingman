@@ -11,6 +11,7 @@ type ComboboxControlInfo = {
   textEntryCapable: boolean;
   tagName: string;
   role: string;
+  visible: boolean;
 };
 
 type ComboboxSurface = {
@@ -98,15 +99,37 @@ async function selectCustomOption(
     text_entry_capable: control.textEntryCapable,
     control_tag: control.tagName,
     control_role: control.role,
+    control_visible: control.visible,
   };
+
+  const allowsForgivingFallback = await allowsForgivingComboboxFallback(page, elementId, deps);
+  diagnostics.allows_forgiving_fallback = allowsForgivingFallback;
+
+  if (control.visible === false) {
+    const preClickOwnedSurface = await resolveOwnedComboboxSurface(
+      page,
+      elementId,
+      deps,
+      2,
+      40,
+      { requireExpanded: false },
+    );
+    diagnostics.pre_click_owned_options = listboxOptionLabels(preClickOwnedSurface?.options ?? []);
+    const preClickOwnedSelection = preClickOwnedSurface
+      ? await trySelectFromComboboxSurface(page, elementId, value, preClickOwnedSurface, allowsForgivingFallback, diagnostics, deps)
+      : 'unavailable';
+    if (preClickOwnedSelection === 'selected') {
+      return;
+    }
+    if (preClickOwnedSelection === 'failed') {
+      throw deps.createError(`No combobox option matching "${value}"`, diagnostics);
+    }
+  }
 
   await deps.safeClick(page, combobox, elementId);
   if (control.textEntryCapable) {
     await combobox.focus().catch(() => {});
   }
-
-  const allowsForgivingFallback = await allowsForgivingComboboxFallback(page, elementId, deps);
-  diagnostics.allows_forgiving_fallback = allowsForgivingFallback;
 
   if (!control.textEntryCapable) {
     const locatorResult = await tryClickOptionViaLocator(page, value, allowsForgivingFallback, deps);
@@ -235,11 +258,13 @@ async function describeComboboxControl(target: Locator): Promise<ComboboxControl
         || el.isContentEditable,
       tagName,
       role,
+      visible: Boolean(el.offsetWidth || el.offsetHeight || el.getClientRects().length),
     };
   }).catch(() => ({
     textEntryCapable: false,
     tagName: '',
     role: '',
+    visible: true,
   }));
 }
 

@@ -371,6 +371,155 @@ describe('external apply action helpers', () => {
     );
   });
 
+  it('selects an owned PageUp combobox even when the input itself is hidden', async () => {
+    const dom = new JSDOM(
+      `
+      <html>
+        <body>
+          <table>
+            <tr>
+              <td id="r_lLKP_LanguageProficiency_SpeakingID_1" style="display:none">
+                <label
+                  id="lLKP_LanguageProficiency_SpeakingID_1_label"
+                  for="lLKP_LanguageProficiency_SpeakingID_1"
+                  style="display:none;"
+                >
+                  Language 1 Speaking proficiency
+                </label>
+                <div id="lLKP_LanguageProficiency_SpeakingID_1" class="input-group cb pu-select">
+                  <input
+                    autocomplete="off"
+                    id="lLKP_LanguageProficiency_SpeakingID_1-edit"
+                    class="form-control dropdownEdit"
+                    type="text"
+                    tabindex="0"
+                    role="combobox"
+                    aria-labelledby="lLKP_LanguageProficiency_SpeakingID_1_label"
+                    aria-activedescendant="lLKP_LanguageProficiency_SpeakingID_1--ID"
+                    aria-autocomplete="both"
+                    aria-owns="lLKP_LanguageProficiency_SpeakingID_1-list"
+                    aria-expanded="false"
+                    aria-controls="lLKP_LanguageProficiency_SpeakingID_1-list"
+                    aria-required="False"
+                    data-envoy-apply-id="field_10"
+                    value=""
+                  />
+                  <div id="lLKP_LanguageProficiency_SpeakingID_1-button-label" class="hidden">Open list</div>
+                  <span class="input-group-btn">
+                    <button
+                      id="lLKP_LanguageProficiency_SpeakingID_1-button"
+                      aria-labelledby="lLKP_LanguageProficiency_SpeakingID_1-button-label"
+                      aria-controls="lLKP_LanguageProficiency_SpeakingID_1-list"
+                      tabindex="-1"
+                      class="btn"
+                      type="button"
+                    >
+                      <span class="caret"></span>
+                    </button>
+                  </span>
+                  <input
+                    type="hidden"
+                    name="lLKP_LanguageProficiency_SpeakingID_1"
+                    id="lLKP_LanguageProficiency_SpeakingID_1-postback"
+                    class="hidden dropdownvalue"
+                    value=""
+                  />
+                  <span id="lLKP_LanguageProficiency_SpeakingID_1-current-value" class="sr-only"></span>
+                  <ul
+                    id="lLKP_LanguageProficiency_SpeakingID_1-list"
+                    class="cb_list"
+                    tabindex="-1"
+                    role="listbox"
+                    aria-expanded="false"
+                    style="display:none"
+                  >
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1--ID" data-value="" class="cb_option selected">Select</li>
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1-4-ID" data-value="4" class="cb_option">None</li>
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1-1-ID" data-value="1" class="cb_option">Basic</li>
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1-3-ID" data-value="3" class="cb_option">Intermediate</li>
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1-5-ID" data-value="5" class="cb_option">Proficient</li>
+                    <li role="option" id="lLKP_LanguageProficiency_SpeakingID_1-2-ID" data-value="2" class="cb_option">Fluent</li>
+                  </ul>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </body>
+      </html>
+      `,
+      { url: 'https://pageup.example/apply' },
+    );
+    const document = dom.window.document;
+    const combobox = document.querySelector<HTMLInputElement>('[data-envoy-apply-id="field_10"]');
+    const hidden = document.querySelector<HTMLInputElement>('#lLKP_LanguageProficiency_SpeakingID_1-postback');
+    const listbox = document.querySelector<HTMLElement>('#lLKP_LanguageProficiency_SpeakingID_1-list');
+    let dropdownOpened = false;
+    document.querySelector<HTMLButtonElement>('#lLKP_LanguageProficiency_SpeakingID_1-button')?.addEventListener('click', () => {
+      dropdownOpened = true;
+      if (!listbox || !combobox) return;
+      listbox.style.display = 'block';
+      listbox.setAttribute('aria-expanded', 'true');
+      combobox.setAttribute('aria-expanded', 'true');
+    });
+
+    const target = {
+      first: () => target,
+      count: vi.fn(async () => 1),
+      click: vi.fn(async () => {
+        throw new Error('hidden input should not be clicked directly');
+      }),
+      focus: vi.fn(async () => {}),
+      fill: vi.fn(async () => {
+        throw new Error('hidden input should not be filled directly');
+      }),
+      evaluate: vi.fn(async (fn: (node: Element) => unknown) => fn(combobox as Element)),
+    };
+    const page = {
+      url: () => 'https://pageup.example/apply',
+      locator: () => target,
+      evaluate: vi.fn(async (fn: (arg: never) => unknown, arg: never) => {
+        const previousWindow = (globalThis as { window?: Window }).window;
+        const previousDocument = (globalThis as { document?: Document }).document;
+        const previousHTMLElement = (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement;
+        (globalThis as { window?: Window }).window = dom.window as unknown as Window;
+        (globalThis as { document?: Document }).document = document;
+        (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement =
+          dom.window.HTMLElement as unknown as typeof HTMLElement;
+        try {
+          if (typeof fn === 'string') {
+            return eval(fn);
+          }
+          return fn(arg);
+        } finally {
+          if (previousWindow) (globalThis as { window?: Window }).window = previousWindow;
+          else delete (globalThis as { window?: Window }).window;
+          if (previousDocument) (globalThis as { document?: Document }).document = previousDocument;
+          else delete (globalThis as { document?: Document }).document;
+          if (previousHTMLElement) (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement = previousHTMLElement;
+          else delete (globalThis as { HTMLElement?: typeof HTMLElement }).HTMLElement;
+        }
+      }),
+      waitForTimeout: vi.fn(async () => {}),
+    };
+
+    const result = await executeExternalApplyAction(
+      page as never,
+      {
+        action_type: 'select_option',
+        element_id: 'field_10',
+        value: 'Proficient',
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(target.click).not.toHaveBeenCalled();
+    expect(target.fill).not.toHaveBeenCalled();
+    expect(dropdownOpened).toBe(true);
+    expect(combobox?.value).toBe('Proficient');
+    expect(hidden?.value).toBe('5');
+    expect(document.querySelector('#lLKP_LanguageProficiency_SpeakingID_1-5-ID')?.className).toBe('cb_option selected');
+  });
+
   it('falls through to the owned listbox when a global listbox does not match', async () => {
     const click = vi.fn(async () => {});
     const focus = vi.fn(async () => {});

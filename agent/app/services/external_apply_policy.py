@@ -168,7 +168,12 @@ def validate_external_apply_action(
                 pause_reason="needs_approval",
                 risk_flags=["optional_or_judgement_consent"],
             )
-        if proposed_action.source not in {"profile", "memory", "user"}:
+        if proposed_action.source not in {"profile", "memory", "user"} and not (
+            proposed_action.source == "inferred"
+            and action_type == "fill_text"
+            and target_field is not None
+            and _looks_like_career_narrative_field(target_field)
+        ):
             return PolicyDecision(
                 decision="paused",
                 reason="Auto-fill requires an approved profile, memory, or user-provided source.",
@@ -405,6 +410,27 @@ def _looks_like_job_search_field(observation: PageObservation, field: ObservedFi
         field.field_type in {"search"}
         or label in {"what", "where", "keyword", "keywords", "job title", "classification"}
         or re.search(r"\b(keyword|job title|classification|location)\b", label) is not None
+    )
+
+
+def _looks_like_career_narrative_field(field: ObservedField) -> bool:
+    if field.field_type not in {"text", "textarea"} and field.control_kind not in {"native_text", "textarea"}:
+        return False
+    text = " ".join([field.label, field.nearby_text]).lower()
+    return bool(
+        re.search(
+            r"\b("
+            r"why (?:are you )?(?:interested|applying)|"
+            r"interested in (?:this|the) (?:role|opportunity|position)|"
+            r"why (?:this|the) (?:role|opportunity|position)|"
+            r"skills?, experience and passion|"
+            r"hit the ground running|"
+            r"make a difference|"
+            r"what (?:interests|motivates) you|"
+            r"motivation for (?:applying|this role)"
+            r")\b",
+            text,
+        )
     )
 
 

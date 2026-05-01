@@ -561,3 +561,30 @@ def test_policy_pauses_planner_user_request() -> None:
 
     assert decision.decision == "paused"
     assert decision.pause_reason == "needs_user_input"
+
+
+def test_policy_allows_inferred_career_narrative_text_answer() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        fields=[
+            ObservedField(
+                element_id="field_interest",
+                label="Briefly outline why you are interested in this opportunity.*",
+                field_type="textarea",
+                required=True,
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="fill_text",
+        element_id="field_interest",
+        value="I am interested because the role aligns with my data platform leadership experience.",
+        confidence=0.88,
+        risk="medium",
+        reason="Synthesised from the candidate profile and observed job context.",
+        source="inferred",
+    )
+
+    decision = validate_external_apply_action(observation=observation, proposed_action=action)
+
+    assert decision.decision == "allowed"

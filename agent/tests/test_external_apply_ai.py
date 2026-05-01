@@ -547,3 +547,48 @@ def test_batch_prompt_asks_for_multiple_safe_field_actions() -> None:
     assert "\"actions\"" in system
     assert payload["page"]["fields"][0]["element_id"] == "field_1"
     assert payload["available_facts"]["first_name"] == "Nitin"
+
+
+def test_batch_prompt_allows_profile_grounded_career_narrative_answers() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        title="Apply",
+        fields=[
+            ObservedField(
+                element_id="field_interest",
+                label="Briefly outline why you are interested in this opportunity.*",
+                field_type="textarea",
+                required=True,
+            )
+        ],
+        visible_text="Principal Data Engineer role focused on data platforms and analytics leadership.",
+    )
+
+    system, user = build_external_apply_batch_planner_messages(
+        observation=observation,
+        profile_facts={
+            "name": "Nitin Datta",
+            "headline": "Principal Data Engineer",
+            "summary": "Senior data engineering leader focused on reliable analytics platforms.",
+            "core_strengths": ["data platform architecture", "team leadership"],
+            "evidence_items": [
+                {
+                    "role_title": "Principal Data Engineer",
+                    "skills": ["Databricks", "AWS", "data modelling"],
+                    "action": "Led delivery of governed data products for enterprise users.",
+                    "outcome": "Improved reporting reliability and delivery confidence.",
+                }
+            ],
+            "voice_profile": {"tone_labels": ["direct", "practical"]},
+        },
+        approved_memory=[],
+        recent_actions=[],
+    )
+
+    payload = json.loads(user)
+
+    assert "career narrative" in system
+    assert "why you are interested" in system
+    assert payload["available_facts"]["headline"] == "Principal Data Engineer"
+    assert payload["available_facts"]["core_strengths"] == ["data platform architecture", "team leadership"]
+    assert payload["available_facts"]["evidence_items"][0]["skills"] == ["Databricks", "AWS", "data modelling"]

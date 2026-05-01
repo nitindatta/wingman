@@ -104,9 +104,14 @@ export function collectExternalApplyObservation(): PageObservation {
 
   const isVisible = (el: Element): boolean => {
     if (!(el instanceof window.HTMLElement)) return false;
-    if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
-    const style = window.getComputedStyle(el);
-    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+    let current: HTMLElement | null = el;
+    while (current) {
+      if (current.hidden || current.getAttribute('aria-hidden') === 'true') return false;
+      const currentStyle = window.getComputedStyle(current);
+      if (currentStyle.display === 'none' || ['hidden', 'collapse'].includes(currentStyle.visibility)) return false;
+      current = current.parentElement;
+    }
+    return window.getComputedStyle(el).opacity !== '0';
   };
 
   const hasVisibleAssociatedLabel = (input: HTMLInputElement): boolean => {

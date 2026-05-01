@@ -194,6 +194,44 @@ describe('collectExternalApplyObservation', () => {
     ]);
   });
 
+  it('does not observe PageUp conditional inputs inside hidden containers', () => {
+    const observation = withDom(
+      `
+      <html>
+        <body>
+          <form>
+            <div class="form-group" style="display: none" id="r_9563">
+              <label id="lbl9563" for="q9563">
+                Please enter your notice period <span class="asterisk">*</span>
+              </label>
+              <input
+                type="text"
+                name="q9563"
+                id="q9563"
+                value=""
+                aria-required="true"
+                data-envoy-apply-id="field_1"
+              />
+            </div>
+            <div class="form-group" id="r_9566">
+              <label for="q9566_no">I will be on leave for some time during the next 6 months:</label>
+              <input id="q9566_no" type="checkbox" checked />
+              <label for="q9566_no">No</label>
+            </div>
+            <button type="submit">Continue</button>
+          </form>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.fields.map((field) => field.label)).not.toContain('Please enter your notice period *');
+    expect(observation.fields).toHaveLength(1);
+    expect(observation.fields[0]?.label).toBe('I will be on leave for some time during the next 6 months:');
+    expect(observation.buttons[0]?.label).toBe('Continue');
+  });
+
   it('does not report combobox option transcripts as validation errors', () => {
     const observation = withDom(
       `

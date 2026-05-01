@@ -228,7 +228,10 @@ def build_external_apply_planner_messages(
         "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
-        "Ask the user when required information is missing, judgement-based, sensitive, or ambiguous. "
+        "For career narrative questions such as why you are interested, why this opportunity, or how your "
+        "skills, experience, and passion fit the role, draft a concise tailored answer grounded only in "
+        "available_facts and observed page/job context; use source profile or inferred. "
+        "Ask the user when required information is missing, sensitive, a personal self-report, or ambiguous. "
         "When asking the user, ask for exactly one observed field per ask_user action; do not bundle multiple fields "
         "or multiple answers into one question. "
         "Never final-submit; return stop_ready_to_submit at the final submission gate. "
@@ -267,7 +270,10 @@ def build_external_apply_batch_planner_messages(
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
         "Prefer safe field actions before navigation, skip fields that already have useful current_value, "
-        "and ask the user for required information that is missing, judgement-based, sensitive, or ambiguous. "
+        "and draft career narrative answers for questions like why you are interested, why this opportunity, "
+        "or how your skills, experience, and passion fit the role when available_facts and observed page/job "
+        "context are enough. Use source profile or inferred for those grounded narrative answers. "
+        "Ask the user for required information that is missing, sensitive, a personal self-report, or ambiguous. "
         "When asking the user, ask for exactly one observed field per ask_user action; return multiple ask_user "
         "actions when multiple fields need user input, and do not bundle multiple answers into one question. "
         "Do not include click, stop_ready_to_submit, or stop_failed after field actions in the same page plan; "
@@ -523,6 +529,8 @@ def _available_facts_for_prompt(profile_facts: dict[str, Any]) -> dict[str, Any]
         "full_name",
         "first_name",
         "last_name",
+        "headline",
+        "summary",
         "email",
         "phone",
         "linkedin_url",
@@ -530,15 +538,51 @@ def _available_facts_for_prompt(profile_facts: dict[str, Any]) -> dict[str, Any]
         "city",
         "contact",
         "address",
+        "work_rights",
+        "core_strengths",
+        "skills",
+        "experience",
         "employment_history",
+        "selected_projects",
+        "projects",
+        "evidence_items",
+        "voice_profile",
+        "voice_samples",
+        "proposal_preferences",
         "external_accounts",
         "resume_path",
     }
     return {
-        key: value
+        key: _compact_prompt_fact(value)
         for key, value in profile_facts.items()
         if key in allowed_top_level and value not in (None, "", [], {})
     }
+
+
+def _compact_prompt_fact(value: Any, *, depth: int = 0) -> Any:
+    if isinstance(value, dict):
+        if depth >= 4:
+            return {}
+        return {
+            str(key): _compact_prompt_fact(child, depth=depth + 1)
+            for key, child in value.items()
+            if child not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        if depth >= 4:
+            return []
+        limit = 8 if depth == 0 else 5
+        return [_compact_prompt_fact(item, depth=depth + 1) for item in value[:limit]]
+    if isinstance(value, str):
+        return _short_text(value)
+    if depth >= 4:
+        return _short_text(value)
+    return value
+
+
+def _short_text(value: Any) -> str:
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text[:900]
 
 
 def _redact_prompt_value(value: Any, *, key_path: str = "") -> Any:

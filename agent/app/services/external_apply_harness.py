@@ -585,7 +585,8 @@ def _build_planning_frame(
     phase = _planning_phase(observation, memory_context)
     strategies = [
         "fill_select_check_or_upload_safe_fields_from_available_facts_or_approved_memory",
-        "ask_user_for_required_fields_that_need_judgement_or_have_no_approved_answer",
+        "draft_profile_grounded_career_narrative_answers_for_interest_motivation_and_fit_questions",
+        "ask_user_for_sensitive_personal_self_reports_or_missing_factual_answers",
         "click_navigation_only_after_current_page_required_fields_are_resolved",
         "return_stop_ready_to_submit_instead_of_final_submission",
     ]
