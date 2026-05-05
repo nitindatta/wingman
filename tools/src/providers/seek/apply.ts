@@ -7,10 +7,31 @@
 import type { Page } from 'playwright-core';
 
 export function isExternalPortalUrl(url: string): boolean {
+  return !isSeekApplicantUrl(url) || isSeekExternalInterstitialUrl(url);
+}
+
+function isSeekApplicantUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.toLowerCase();
   return (
-    !url.includes('seek.com.au') ||
-    (url.includes('seek.com.au') && url.includes('/apply/external'))
+    host === 'seek.com.au' ||
+    host.endsWith('.seek.com.au') ||
+    /^[a-z]{2}\.seek\.com$/.test(host)
   );
+}
+
+function isSeekExternalInterstitialUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return isSeekApplicantUrl(url) && parsed.pathname.includes('/apply/external');
+  } catch {
+    return false;
+  }
 }
 
 export function isConfirmationPage(pageText: string): boolean {
@@ -96,7 +117,7 @@ export function scoreExternalApplyHref(candidate: ExternalHrefCandidate): number
   const host = url.hostname.toLowerCase();
   const text = `${candidate.label} ${candidate.nearbyText ?? ''}`.toLowerCase();
 
-  if (host.endsWith('seek.com.au')) {
+  if (isSeekApplicantUrl(candidate.href)) {
     return /\bapply\s+with\s+seek\b/.test(text) ? 1_000 : -100;
   }
   if (NON_APPLY_HOSTS.some((blockedHost) => host.includes(blockedHost))) return -100;
@@ -212,7 +233,7 @@ export async function startApply(page: Page, jobUrl: string): Promise<StartApply
     return { status: 'needs_human', reason: 'auth_required', login_url: applyUrl };
   }
 
-  if (applyUrl.includes('seek.com.au') && applyUrl.includes('/apply/external')) {
+  if (isSeekExternalInterstitialUrl(applyUrl)) {
     try {
       const externalHref = await findBestExternalApplyHref(page);
       if (externalHref) {
@@ -234,9 +255,7 @@ export async function startApply(page: Page, jobUrl: string): Promise<StartApply
     applyUrl = page.url();
   }
 
-  const is_external_portal =
-    !applyUrl.includes('seek.com.au') ||
-    (applyUrl.includes('seek.com.au') && applyUrl.includes('/apply/external'));
+  const is_external_portal = isExternalPortalUrl(applyUrl);
   const portal_type = is_external_portal ? detectPortalType(applyUrl) : null;
 
   return { status: 'ok', apply_url: applyUrl, is_external_portal, portal_type };

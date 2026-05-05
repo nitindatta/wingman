@@ -1,0 +1,74 @@
+{
+  "name": "elmo_noisy_upload",
+  "description": "ELMO resume upload step where hidden file inputs were observed with noisy job/script text instead of document labels.",
+  "observation": {
+    "url": "https://inghams.elmotalent.com.au/careers/default/job/apply/1025#/step1",
+    "title": "Inghams",
+    "page_type": "resume_upload",
+    "visible_text": "Your current resume must be uploaded in order to submit this application. Documents must be uploaded in one of the following formats: .DOC, .DOCX .PDF, .TXT, .RTF. Please attach your cover letter No cover letter Upload my cover letter from my computer Please attach any other relevant documentation (optional)",
+    "fields": [
+      {
+        "element_id": "field_resume",
+        "label": "var regexInvalidFilenameCharacters = '[?'\"\\:<>|]'; Senior Data Innovation Lead - Copy Posted: 01/05/2026 Closing Date: 01/06/2026 Job Type: Permanent - Full Time Location: NSW - Macquarie Park",
+        "field_type": "file",
+        "control_kind": "file_upload",
+        "required": false
+      },
+      {
+        "element_id": "field_cover_choice",
+        "label": "No cover letter",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": false,
+        "current_value": "Upload my cover letter from my computer",
+        "options": [
+          "No cover letter",
+          "Upload my cover letter from my computer",
+          "Write or paste my cover letter"
+        ]
+      },
+      {
+        "element_id": "field_cover",
+        "label": "var regexInvalidFilenameCharacters = '[?'\"\\:<>|]'; Senior Data Innovation Lead - Copy Posted: 01/05/2026 Closing Date: 01/06/2026 Job Type: Permanent - Full Time Location: NSW - Macquarie Park",
+        "field_type": "file",
+        "control_kind": "file_upload",
+        "required": false
+      },
+      {
+        "element_id": "field_other",
+        "label": "Please attach any other relevant documentation (optional)",
+        "field_type": "file",
+        "control_kind": "file_upload",
+        "required": false
+      }
+    ],
+    "buttons": [
+      {
+        "element_id": "button_next",
+        "label": "Continue",
+        "kind": "submit"
+      }
+    ],
+    "links": [],
+    "uploads": [],
+    "errors": []
+  },
+  "expected_fields": {
+    "field_resume": {
+      "label_quality": "weak",
+      "document_kind": "resume",
+      "profile_fact": "resume_path",
+      "answerability": "profile"
+    },
+    "field_cover": {
+      "label_quality": "weak",
+      "document_kind": "cover_letter",
+      "profile_fact": "cover_letter_path",
+      "answerability": "profile"
+    },
+    "field_other": {
+      "document_kind": "additional_document",
+      "answerability": "optional_skip"
+    }
+  }
+}

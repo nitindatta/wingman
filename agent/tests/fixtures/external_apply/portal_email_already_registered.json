@@ -1,0 +1,98 @@
+{
+  "name": "portal_email_already_registered",
+  "description": "Create-profile attempt returned an account-exists error, so automation should stop creating and mark the portal credential as user-required.",
+  "profile_facts": {
+    "name": "Nitin Datta",
+    "external_accounts": {
+      "default": {
+        "email": "candidate@example.com"
+      },
+      "portals": {
+        "inghams.elmotalent.com.au": {
+          "email": "candidate@example.com",
+          "username": "candidate@example.com",
+          "password": "generated-password",
+          "login_method": "password",
+          "account_mode": "create",
+          "status": "pending_creation",
+          "credential_status": "generated"
+        }
+      }
+    }
+  },
+  "observation": {
+    "url": "https://inghams.elmotalent.com.au/careers/default/login/",
+    "title": "Sign in or Create an account",
+    "page_type": "login",
+    "visible_text": "Sign in or Create an account This email is already registered with us. Sorry, this email is already used. Sign In Email Address Password Create Profile First Name Last Name Email New Password Repeat Password",
+    "fields": [
+      {
+        "element_id": "field_login_email",
+        "label": "Email Address",
+        "field_type": "text",
+        "required": true
+      },
+      {
+        "element_id": "field_login_password",
+        "label": "Password",
+        "field_type": "password",
+        "required": true
+      },
+      {
+        "element_id": "field_first",
+        "label": "First Name",
+        "field_type": "text",
+        "required": true,
+        "current_value": "Nitin"
+      },
+      {
+        "element_id": "field_last",
+        "label": "Last Name",
+        "field_type": "text",
+        "required": true,
+        "current_value": "Datta"
+      },
+      {
+        "element_id": "field_email",
+        "label": "Email",
+        "field_type": "email",
+        "required": true,
+        "current_value": "candidate@example.com",
+        "invalid": true,
+        "validation_message": "This email is already registered with us."
+      },
+      {
+        "element_id": "field_new_password",
+        "label": "New Password",
+        "field_type": "password",
+        "required": true,
+        "current_value": "********"
+      },
+      {
+        "element_id": "field_repeat_password",
+        "label": "Repeat Password",
+        "field_type": "password",
+        "required": true,
+        "current_value": "********"
+      }
+    ],
+    "buttons": [
+      {
+        "element_id": "button_signin",
+        "label": "Sign In",
+        "kind": "submit"
+      },
+      {
+        "element_id": "button_create",
+        "label": "Create Profile",
+        "kind": "submit"
+      }
+    ],
+    "links": [],
+    "uploads": [],
+    "errors": [
+      "This email is already registered with us.",
+      "Sorry, this email is already used."
+    ]
+  }
+}

@@ -547,10 +547,25 @@ def _observation_for_prompt(observation: PageObservation) -> dict[str, Any]:
         "visible_text_excerpt": observation.visible_text[:2500],
         "fields": [field.model_dump() for field in observation.fields[:30]],
         "uploads": [field.model_dump() for field in observation.uploads[:10]],
-        "buttons": [button.model_dump() for button in observation.buttons[:20]],
-        "links": [link.model_dump() for link in observation.links[:12]],
+        "buttons": _actions_for_prompt(observation.buttons, limit=20),
+        "links": _actions_for_prompt(observation.links, limit=12),
         "errors": observation.errors[:10],
     }
+
+
+def _actions_for_prompt(actions: list[Any], *, limit: int) -> list[dict[str, Any]]:
+    indexed = list(enumerate(actions))
+
+    def sort_key(item: tuple[int, Any]) -> tuple[int, int]:
+        index, action = item
+        label = str(getattr(action, "label", "") or "").strip().lower()
+        if re.search(r"\b(continue|next|save and continue|proceed|submit application|send application|finish application|apply now)\b", label):
+            return (0, index)
+        if re.search(r"\b(edit|share|email|view job description|job search|people search|career advice|companies|recruiters|community|employer site)\b", label):
+            return (2, index)
+        return (1, index)
+
+    return [action.model_dump() for _, action in sorted(indexed, key=sort_key)[:limit]]
 
 
 def _available_facts_for_prompt(profile_facts: dict[str, Any]) -> dict[str, Any]:

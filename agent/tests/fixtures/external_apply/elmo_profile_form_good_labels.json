@@ -1,0 +1,123 @@
+{
+  "name": "elmo_profile_form_good_labels",
+  "description": "ELMO profile step after browser label recovery, with contact/profile fields and sensitive self-report radio groups.",
+  "profile_facts": {
+    "first_name": "Nitin",
+    "last_name": "Datta",
+    "contact": {
+      "email": "candidate@example.com",
+      "phone": "0400000000"
+    },
+    "address": {
+      "street": "12 Example Street",
+      "country": "Australia"
+    },
+    "external_accounts": {
+      "default": {
+        "working_rights": "Permanent Resident"
+      }
+    }
+  },
+  "observation": {
+    "url": "https://inghams.elmotalent.com.au/careers/default/job/apply/1025#/step2",
+    "title": "Inghams",
+    "page_type": "form",
+    "visible_text": "First Name Last Name Email Address Mobile Phone Address Country Do you currently hold the right to work in the country you are applying to? Do you identify as Aboriginal/Torres Strait Islander? Gender",
+    "fields": [
+      {
+        "element_id": "field_first",
+        "label": "First Name",
+        "field_type": "text",
+        "required": true
+      },
+      {
+        "element_id": "field_last",
+        "label": "Last Name",
+        "field_type": "text",
+        "required": true
+      },
+      {
+        "element_id": "field_email",
+        "label": "Email Address",
+        "field_type": "email",
+        "required": true
+      },
+      {
+        "element_id": "field_phone",
+        "label": "Mobile Phone",
+        "field_type": "phone",
+        "required": true
+      },
+      {
+        "element_id": "field_address",
+        "label": "Address",
+        "field_type": "text",
+        "required": true
+      },
+      {
+        "element_id": "field_country",
+        "label": "Country",
+        "field_type": "select",
+        "required": true,
+        "options": ["-- Select an option --", "Australia", "New Zealand"]
+      },
+      {
+        "element_id": "field_rights",
+        "label": "Do you currently hold the right to work in the country you are applying to?",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": true,
+        "options": ["Yes", "No"]
+      },
+      {
+        "element_id": "field_atsi",
+        "label": "Do you identify as Aboriginal/Torres Strait Islander? (relevant for Australian applicants only)",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": true,
+        "options": ["Yes", "No", "Prefer not to answer", "Not applicable"]
+      },
+      {
+        "element_id": "field_gender",
+        "label": "Gender",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": true,
+        "options": ["Male", "Female", "Non-binary", "I use a different term", "Prefer not to say"]
+      }
+    ],
+    "buttons": [
+      {
+        "element_id": "button_next",
+        "label": "Continue",
+        "kind": "submit"
+      }
+    ],
+    "links": [],
+    "uploads": [],
+    "errors": []
+  },
+  "expected_fields": {
+    "field_first": {
+      "profile_fact": "first_name",
+      "answerability": "profile"
+    },
+    "field_email": {
+      "profile_fact": "email",
+      "answerability": "profile"
+    },
+    "field_rights": {
+      "profile_fact": "working_rights",
+      "sensitivity": "judgement",
+      "answerability": "profile"
+    },
+    "field_atsi": {
+      "sensitivity": "personal_sensitive",
+      "answerability": "user_required"
+    },
+    "field_gender": {
+      "sensitivity": "personal_sensitive",
+      "answerability": "user_required"
+    }
+  }
+}

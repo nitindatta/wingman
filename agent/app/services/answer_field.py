@@ -23,27 +23,45 @@ log = logging.getLogger("answer_field")
 
 # ── 1. Profile lookup ──────────────────────────────────────────────────────
 
+def _profile_path_value(profile: dict, path: str) -> str:
+    current: object = profile
+    for part in path.split("."):
+        if not isinstance(current, dict):
+            return ""
+        current = current.get(part)
+    return str(current or "").strip()
+
+
+def _first_profile_value(profile: dict, paths: list[str]) -> str:
+    for path in paths:
+        value = _profile_path_value(profile, path)
+        if value:
+            return value
+    return ""
+
+
 _PROFILE_FIELD_MAP = {
     # Common SEEK field labels → profile keys
     "first name": lambda p: p.get("name", "").split()[0] if p.get("name") else "",
     "last name": lambda p: p.get("name", "").split()[-1] if p.get("name") else "",
     "full name": lambda p: p.get("name", ""),
     "name": lambda p: p.get("name", ""),
-    "email": lambda p: p.get("contact", {}).get("email", ""),
-    "email address": lambda p: p.get("contact", {}).get("email", ""),
-    "phone": lambda p: p.get("contact", {}).get("phone", ""),
-    "phone number": lambda p: p.get("contact", {}).get("phone", ""),
-    "mobile": lambda p: p.get("contact", {}).get("phone", ""),
+    "email": lambda p: _first_profile_value(p, ["contact.email", "email", "external_accounts.default.email"]),
+    "email address": lambda p: _first_profile_value(p, ["contact.email", "email", "external_accounts.default.email"]),
+    "phone": lambda p: _first_profile_value(p, ["contact.phone", "phone", "external_accounts.default.phone"]),
+    "phone number": lambda p: _first_profile_value(p, ["contact.phone", "phone", "external_accounts.default.phone"]),
+    "mobile": lambda p: _first_profile_value(p, ["contact.phone", "phone", "external_accounts.default.phone"]),
     "location": lambda p: p.get("location", ""),
     "city": lambda p: p.get("location", "").split(",")[0].strip() if p.get("location") else "",
-    "right to work": lambda p: p.get("work_rights", ""),
-    "work rights": lambda p: p.get("work_rights", ""),
-    "right to work in australia": lambda p: p.get("work_rights", ""),
-    "salary": lambda p: p.get("salary_expectation", ""),
-    "salary expectation": lambda p: p.get("salary_expectation", ""),
-    "expected salary": lambda p: p.get("salary_expectation", ""),
-    "notice period": lambda p: p.get("notice_period", ""),
-    "availability": lambda p: p.get("notice_period", ""),
+    "right to work": lambda p: _first_profile_value(p, ["work_rights", "external_accounts.default.working_rights", "external_accounts.default.work_rights"]),
+    "work rights": lambda p: _first_profile_value(p, ["work_rights", "external_accounts.default.working_rights", "external_accounts.default.work_rights"]),
+    "right to work in australia": lambda p: _first_profile_value(p, ["work_rights", "external_accounts.default.working_rights", "external_accounts.default.work_rights"]),
+    "salary": lambda p: _first_profile_value(p, ["salary_expectation", "expected_salary", "external_accounts.default.expected_salary", "external_accounts.default.salary_expectation"]),
+    "salary expectation": lambda p: _first_profile_value(p, ["salary_expectation", "expected_salary", "external_accounts.default.expected_salary", "external_accounts.default.salary_expectation"]),
+    "expected salary": lambda p: _first_profile_value(p, ["salary_expectation", "expected_salary", "external_accounts.default.expected_salary", "external_accounts.default.salary_expectation"]),
+    "notice period": lambda p: _first_profile_value(p, ["notice_period", "external_accounts.default.notice_period", "external_accounts.default.notice"]),
+    "notice": lambda p: _first_profile_value(p, ["notice_period", "external_accounts.default.notice_period", "external_accounts.default.notice"]),
+    "availability": lambda p: _first_profile_value(p, ["notice_period", "external_accounts.default.notice_period", "external_accounts.default.notice"]),
     "cover letter": None,  # handled separately
 }
 
@@ -85,14 +103,26 @@ def _best_select_match(value: str, options: list[str]) -> str | None:
             return opt
 
     # 3. Numeric range overlap
-    val_nums = [int(n.replace(",", "")) for n in _re.findall(r"[\d,]+", value) if n.replace(",", "").isdigit()]
+    def numeric_values(text: str) -> list[int]:
+        values: list[int] = []
+        for match in _re.finditer(r"(\d[\d,]*)(?:\s*(k)\b)?", text, flags=_re.IGNORECASE):
+            raw = match.group(1).replace(",", "")
+            if not raw.isdigit():
+                continue
+            number = int(raw)
+            if match.group(2) and number < 1000:
+                number *= 1000
+            values.append(number)
+        return values
+
+    val_nums = numeric_values(value)
     if val_nums:
         val_lo = val_nums[0]
         val_hi = val_nums[-1] if len(val_nums) > 1 else val_lo
         best_opt = None
         best_dist = float("inf")
         for opt in options:
-            opt_nums = [int(n.replace(",", "")) for n in _re.findall(r"[\d,]+", opt) if n.replace(",", "").isdigit()]
+            opt_nums = numeric_values(opt)
             if len(opt_nums) >= 2:
                 opt_lo, opt_hi = opt_nums[0], opt_nums[-1]
                 # Check if our range overlaps with this option's range
@@ -106,7 +136,7 @@ def _best_select_match(value: str, options: list[str]) -> str | None:
                 if dist < best_dist:
                     best_dist = dist
                     best_opt = opt
-        if best_opt and best_dist < 10_000:
+        if best_opt and best_dist <= 10_000:
             return best_opt
 
     return None

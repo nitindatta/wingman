@@ -1,0 +1,72 @@
+{
+  "name": "elmo_profile_form_bad_labels",
+  "description": "ELMO profile step before browser label recovery, where required fields were empty or option-only labels.",
+  "observation": {
+    "url": "https://inghams.elmotalent.com.au/careers/default/job/apply/1025#/step2",
+    "title": "Inghams",
+    "page_type": "form",
+    "visible_text": "Do you currently hold the right to work in the country you are applying to? Yes No Required Do you identify as Aboriginal/Torres Strait Islander? Yes No Prefer not to answer Not applicable Required Gender Male Female Non-binary Prefer not to say",
+    "fields": [
+      {
+        "element_id": "field_11",
+        "label": "",
+        "field_type": "text",
+        "required": true,
+        "invalid": true,
+        "validation_message": "Please fill in this field."
+      },
+      {
+        "element_id": "field_18",
+        "label": "Yes",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": true,
+        "options": ["Yes", "No"],
+        "invalid": true,
+        "validation_message": "Yes is required."
+      },
+      {
+        "element_id": "field_19",
+        "label": "Yes",
+        "field_type": "radio",
+        "control_kind": "native_radio_group",
+        "required": true,
+        "options": ["Yes", "No"],
+        "invalid": true,
+        "validation_message": "Yes is required."
+      }
+    ],
+    "buttons": [
+      {
+        "element_id": "button_next",
+        "label": "Continue",
+        "kind": "submit"
+      }
+    ],
+    "links": [],
+    "uploads": [],
+    "errors": ["Please fill in this field.", "Yes is required."]
+  },
+  "expected_fields": {
+    "field_11": {
+      "label_quality": "missing",
+      "answerability": "unsafe_unknown"
+    },
+    "field_18": {
+      "label_quality": "weak",
+      "answerability": "unsafe_unknown"
+    },
+    "field_19": {
+      "label_quality": "weak",
+      "answerability": "unsafe_unknown"
+    }
+  },
+  "expected_quality_issues": [
+    "field_11: required field has missing label",
+    "field_11: required field cannot be safely classified",
+    "field_18: required field has weak label",
+    "field_18: required field cannot be safely classified",
+    "field_19: required field has weak label",
+    "field_19: required field cannot be safely classified"
+  ]
+}

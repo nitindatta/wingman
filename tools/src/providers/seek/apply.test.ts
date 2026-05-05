@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chooseBestExternalApplyHref, detectPortalType } from './apply.js';
+import { chooseBestExternalApplyHref, detectPortalType, isExternalPortalUrl } from './apply.js';
 
 describe('SEEK external apply URL selection', () => {
   it('prefers Apply with SEEK over an advertiser external link when both are offered', () => {
@@ -50,5 +50,17 @@ describe('SEEK external apply URL selection', () => {
 
   it('detects PageUp portals', () => {
     expect(detectPortalType('https://secure.dc2.pageuppeople.com/apply/889/aw/applicationForm/initApplication.asp')).toBe('pageup');
+  });
+
+  it('keeps SEEK internal apply pages inside the SEEK provider flow', () => {
+    expect(isExternalPortalUrl('https://au.seek.com/job/91685860/apply/profile')).toBe(false);
+    expect(isExternalPortalUrl('https://au.seek.com/job/91685860/apply/role-requirements')).toBe(false);
+    expect(isExternalPortalUrl('https://www.seek.com.au/job/123/apply')).toBe(false);
+  });
+
+  it('still treats SEEK external advertiser interstitials and ATS hosts as external', () => {
+    expect(isExternalPortalUrl('https://au.seek.com/job/91685860/apply/external')).toBe(true);
+    expect(isExternalPortalUrl('https://www.seek.com.au/job/123/apply/external')).toBe(true);
+    expect(isExternalPortalUrl('https://secure.dc2.pageuppeople.com/apply/889/aw/applicationForm/initApplication.asp')).toBe(true);
   });
 });

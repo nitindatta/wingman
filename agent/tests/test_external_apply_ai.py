@@ -4,6 +4,7 @@ import pytest
 
 from app.services.external_apply_ai import (
     _append_external_apply_llm_transcript,
+    _observation_for_prompt,
     build_external_apply_batch_planner_messages,
     build_external_apply_planner_messages,
     fallback_proposed_action,
@@ -130,6 +131,23 @@ def test_batch_fallback_retries_invalid_field_before_disabled_continue_pause() -
     assert [action.action_type for action in actions] == ["fill_text"]
     assert actions[0].element_id == "field_phone"
     assert actions[0].value == "0400000000"
+
+
+def test_prompt_keeps_navigation_buttons_when_many_edit_buttons_are_observed() -> None:
+    observation = PageObservation(
+        url="https://au.seek.com/job/91685860/apply/profile",
+        title="Update SEEK Profile | SEEK",
+        page_type="review",
+        buttons=[
+            ObservedAction(element_id=f"button_edit_{index}", label=f"Edit role {index}", kind="button")
+            for index in range(25)
+        ]
+        + [ObservedAction(element_id="button_continue", label="Continue", kind="submit")],
+    )
+
+    prompt_page = _observation_for_prompt(observation)
+
+    assert "button_continue" in [button["element_id"] for button in prompt_page["buttons"]]
 
 
 def test_fallback_fills_email_from_external_accounts_default() -> None:

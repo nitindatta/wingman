@@ -202,6 +202,65 @@ async def test_propose_field_values_batches_multiple_llm_fields(
     ]
 
 
+async def test_propose_field_values_uses_external_account_defaults_for_seek_screening(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_llm(*args: object, **kwargs: object) -> dict[str, tuple[str, float]]:
+        raise AssertionError("profile defaults should answer these fields before LLM")
+
+    monkeypatch.setattr(answer_field, "_resolve_batch_via_llm", fail_llm)
+    fields = [
+        FieldInfo(
+            id="work_rights",
+            label="Which of the following statements best describes your right to work in Australia?",
+            field_type="select",
+            required=True,
+            options=[
+                "I'm an Australian citizen",
+                "I'm a permanent resident and/or NZ citizen",
+                "I require sponsorship to work for a new employer (e.g. 482, 457)",
+            ],
+        ),
+        FieldInfo(
+            id="salary",
+            label="What's your expected annual base salary?",
+            field_type="select",
+            required=True,
+            options=["$150k", "$170k", "$200k", "$250k"],
+        ),
+        FieldInfo(
+            id="notice",
+            label="How much notice are you required to give your current employer?",
+            field_type="select",
+            required=True,
+            options=["Immediately", "1 week", "2 weeks", "4 weeks"],
+        ),
+    ]
+
+    proposed, low_confidence = await answer_field.propose_field_values(
+        fields=fields,
+        profile={
+            "external_accounts": {
+                "default": {
+                    "working_rights": "Permanent Resident",
+                    "expected_salary": "$180,000 - $200,000",
+                    "notice_period": "2 weeks",
+                }
+            }
+        },
+        cover_letter="",
+        settings=_settings(),
+        question_cache=FakeQuestionCache(),  # type: ignore[arg-type]
+    )
+
+    assert proposed == {
+        "work_rights": "I'm a permanent resident and/or NZ citizen",
+        "salary": "$170k",
+        "notice": "2 weeks",
+    }
+    assert low_confidence == []
+
+
 async def test_question_cache_records_source_and_returns_blank_answers() -> None:
     db = await Database.in_memory()
     try:
