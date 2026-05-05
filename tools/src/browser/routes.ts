@@ -13,8 +13,9 @@ import path from 'node:path';
 import { z } from 'zod';
 import { ok, error, type ToolResponse } from '../envelope.js';
 import { createSession, getSession, closeSession } from './sessions.js';
+import type { Session } from './sessions.js';
 import { inspectStep, type StepInfo, type InspectOptions } from './inspector.js';
-import { executeExternalApplyAction } from './externalApplyActions.js';
+import { executeExternalApplyAction, type ExternalApplyAction, type ExternalApplyActionResult } from './externalApplyActions.js';
 import { observeExternalApplyPage } from './externalApplyObserver.js';
 import { startGenericExternalApply } from './externalApplyStart.js';
 import { saveSnapshot } from './snapshot.js';
@@ -191,8 +192,9 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     const session = getSession(parsed.data.session_key);
     if (!session) return sessionError(parsed.data.session_key);
 
+    const previousPages = new Set(session.page.context().pages());
     const result = await executeExternalApplyAction(session.page, parsed.data.action);
-    return ok(result);
+    return ok(await maybeAdoptNewExternalApplyPage(session, parsed.data.action, result, previousPages));
   });
 
   // ── fill_fields ───────────────────────────────────────────────────────────
@@ -546,4 +548,58 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
       return error('navigation_failed', String(err));
     }
   });
+}
+
+export async function maybeAdoptNewExternalApplyPage(
+  session: Pick<Session, 'page'>,
+  action: ExternalApplyAction,
+  result: ExternalApplyActionResult,
+  previousPages: Set<Page>,
+): Promise<ExternalApplyActionResult> {
+  if (action.action_type !== 'click' || !result.ok || result.navigated) {
+    return result;
+  }
+
+  const openedPage = await findNewSessionPage(session.page, previousPages);
+  if (!openedPage) {
+    return result;
+  }
+
+  await openedPage.bringToFront().catch(() => {});
+  await openedPage.waitForLoadState('domcontentloaded', { timeout: 10_000 }).catch(() => {});
+  await openedPage.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {});
+  await openedPage.waitForTimeout(500).catch(() => {});
+
+  const previousPageUrl = result.new_url;
+  const openedUrl = openedPage.url();
+  session.page = openedPage;
+
+  return {
+    ...result,
+    navigated: Boolean(openedUrl && openedUrl !== previousPageUrl),
+    new_url: openedUrl || previousPageUrl,
+    diagnostics: {
+      ...(result.diagnostics ?? {}),
+      page_handoff: 'new_page_after_click',
+      previous_page_url: previousPageUrl,
+    },
+  };
+}
+
+async function findNewSessionPage(currentPage: Page, previousPages: Set<Page>): Promise<Page | null> {
+  const context = currentPage.context();
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const candidates = context
+      .pages()
+      .filter((page) => page !== currentPage && !previousPages.has(page) && !page.isClosed())
+      .reverse();
+    for (const candidate of candidates) {
+      await candidate.waitForLoadState('domcontentloaded', { timeout: 1_500 }).catch(() => {});
+      if (candidate.url() && candidate.url() !== 'about:blank') {
+        return candidate;
+      }
+    }
+    await currentPage.waitForTimeout(250).catch(() => {});
+  }
+  return null;
 }

@@ -51,10 +51,23 @@ ControlKind = Literal[
     "file_upload",
     "unknown",
 ]
+LabelQuality = Literal["missing", "weak", "good"]
+DocumentKind = Literal["resume", "cover_letter", "additional_document", "unknown"]
+FieldSensitivity = Literal["none", "personal_sensitive", "judgement", "credential"]
+FieldAnswerability = Literal[
+    "already_answered",
+    "profile",
+    "memory",
+    "inferable",
+    "user_required",
+    "unsafe_unknown",
+    "optional_skip",
+]
 HarnessStatus = Literal[
     "running",
     "paused_for_user",
     "paused_for_approval",
+    "email_verification_required",
     "ready_to_submit",
     "completed",
     "failed",
@@ -76,6 +89,12 @@ class ObservedField(BaseModel):
     visible: bool = True
     invalid: bool = False
     validation_message: str | None = None
+    label_quality: LabelQuality | None = None
+    profile_fact: str | None = None
+    document_kind: DocumentKind | None = None
+    sensitivity: FieldSensitivity | None = None
+    answerability: FieldAnswerability | None = None
+    insight_reason: str | None = None
 
 
 class ObservedAction(BaseModel):

@@ -96,7 +96,9 @@ export function scoreExternalApplyHref(candidate: ExternalHrefCandidate): number
   const host = url.hostname.toLowerCase();
   const text = `${candidate.label} ${candidate.nearbyText ?? ''}`.toLowerCase();
 
-  if (host.endsWith('seek.com.au')) return -100;
+  if (host.endsWith('seek.com.au')) {
+    return /\bapply\s+with\s+seek\b/.test(text) ? 1_000 : -100;
+  }
   if (NON_APPLY_HOSTS.some((blockedHost) => host.includes(blockedHost))) return -100;
   if (SEEK_NETWORK_EXTERNAL_HOSTS.some((blockedHost) => host.includes(blockedHost))) return -50;
 

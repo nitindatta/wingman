@@ -477,6 +477,55 @@ def test_policy_accepts_resume_upload_from_configured_profile_file(tmp_path) -> 
     assert decision.decision == "allowed"
 
 
+def test_policy_accepts_required_file_upload_on_resume_upload_page_with_noisy_label(tmp_path) -> None:
+    resume_path = tmp_path / "resume.docx"
+    resume_path.write_bytes(b"docx")
+    observation = PageObservation(
+        url="https://ats.example/apply#/step1",
+        page_type="resume_upload",
+        title="Upload Resume",
+        visible_text="Your current resume must be uploaded in order to submit this application. Click Browse and Upload.",
+        fields=[
+            ObservedField(
+                element_id="field_1",
+                label=(
+                    "var regexInvalidFilenameCharacters = '[?\\'\"\\:<>|]'; "
+                    "Senior Data Innovation Lead Posted: 01/05/2026 Job Type: Permanent"
+                ),
+                field_type="file",
+                control_kind="file_upload",
+                required=False,
+            )
+        ],
+        links=[
+            ObservedAction(
+                element_id="link_resume",
+                label="Resume",
+                kind="link",
+                href="https://ats.example/apply",
+                nearby_text="Resume Application Submit",
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="upload_file",
+        element_id="field_1",
+        value=str(resume_path),
+        confidence=0.96,
+        risk="low",
+        reason="Resume upload comes from the configured profile resume file.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"resume_path": str(resume_path)},
+    )
+
+    assert decision.decision == "allowed"
+
+
 def test_policy_accepts_cover_letter_upload_from_generated_profile_file(tmp_path) -> None:
     cover_letter_path = tmp_path / "cover-letter.txt"
     cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
@@ -501,6 +550,119 @@ def test_policy_accepts_cover_letter_upload_from_generated_profile_file(tmp_path
     )
 
     assert decision.decision == "allowed"
+
+
+def test_policy_accepts_cover_letter_upload_mode_from_generated_profile_file(tmp_path) -> None:
+    cover_letter_path = tmp_path / "cover-letter.txt"
+    cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        page_type="resume_upload",
+        fields=[
+            ObservedField(
+                element_id="field_cover_choice",
+                label="No cover letter",
+                field_type="radio",
+                control_kind="native_radio_group",
+                current_value="No cover letter",
+                options=[
+                    "No cover letter",
+                    "Upload my cover letter from my computer",
+                    "Write or paste my cover letter",
+                ],
+            )
+        ],
+    )
+    action = ProposedAction(
+        action_type="set_radio",
+        element_id="field_cover_choice",
+        value="Upload my cover letter from my computer",
+        confidence=0.97,
+        risk="low",
+        reason="Choose the cover-letter upload mode because a generated cover-letter file exists.",
+        source="profile",
+    )
+
+    decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=action,
+        profile_facts={"cover_letter_path": str(cover_letter_path)},
+    )
+
+    assert decision.decision == "allowed"
+
+
+def test_policy_accepts_ordered_noisy_resume_and_cover_letter_uploads(tmp_path) -> None:
+    resume_path = tmp_path / "resume.docx"
+    cover_letter_path = tmp_path / "cover-letter.txt"
+    resume_path.write_bytes(b"docx")
+    cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
+    noisy_label = (
+        "var regexInvalidFilenameCharacters = '[?\\'\"\\:<>|]'; "
+        "Senior Data Innovation Lead - Copy Posted: 01/05/2026"
+    )
+    observation = PageObservation(
+        url="https://ats.example/apply#/step1",
+        page_type="resume_upload",
+        fields=[
+            ObservedField(
+                element_id="field_resume",
+                label=noisy_label,
+                field_type="file",
+                control_kind="file_upload",
+                required=False,
+            ),
+            ObservedField(
+                element_id="field_cover_choice",
+                label="No cover letter",
+                field_type="radio",
+                control_kind="native_radio_group",
+                current_value="Upload my cover letter from my computer",
+                options=[
+                    "No cover letter",
+                    "Upload my cover letter from my computer",
+                    "Write or paste my cover letter",
+                ],
+            ),
+            ObservedField(
+                element_id="field_cover",
+                label=noisy_label,
+                field_type="file",
+                control_kind="file_upload",
+                required=False,
+            ),
+        ],
+    )
+
+    resume_decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=ProposedAction(
+            action_type="upload_file",
+            element_id="field_resume",
+            value=str(resume_path),
+            confidence=0.96,
+            risk="low",
+            reason="Upload the configured resume.",
+            source="profile",
+        ),
+        profile_facts={"resume_path": str(resume_path), "cover_letter_path": str(cover_letter_path)},
+    )
+    cover_decision = validate_external_apply_action(
+        observation=observation,
+        proposed_action=ProposedAction(
+            action_type="upload_file",
+            element_id="field_cover",
+            value=str(cover_letter_path),
+            confidence=0.74,
+            risk="low",
+            reason="Upload the generated cover letter.",
+            source="profile",
+        ),
+        profile_facts={"resume_path": str(resume_path), "cover_letter_path": str(cover_letter_path)},
+    )
+
+    assert resume_decision.decision == "allowed"
+    assert cover_decision.decision == "allowed"
 
 
 def test_policy_pauses_profile_resume_upload_to_non_resume_document_field(tmp_path) -> None:

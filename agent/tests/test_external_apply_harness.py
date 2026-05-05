@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from typing import Any
 
 from app.services.external_apply_harness import (
@@ -23,6 +25,15 @@ from app.state.external_apply import (
 
 class DummySettings:
     pass
+
+
+class TempExternalAccountSettings:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    @property
+    def resolved_external_accounts_path(self) -> Path:
+        return self._path
 
 
 class DummyToolClient:
@@ -150,6 +161,83 @@ async def test_plan_external_apply_step_pauses_for_user_question() -> None:
     assert state.pending_user_question is not None
     assert state.pending_user_question.question == "What salary should I enter?"
     assert state.pending_user_question.target_element_id == "field_salary"
+
+
+async def test_plan_external_apply_step_enriches_observation_before_planner() -> None:
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="form",
+            fields=[
+                ObservedField(element_id="field_email", label="Email Address", field_type="email", required=True),
+                ObservedField(element_id="field_unknown", label="", field_type="text", required=True),
+            ],
+        )
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        fields = kwargs["observation"].fields
+        assert fields[0].profile_fact == "email"
+        assert fields[0].answerability == "profile"
+        assert fields[1].label_quality == "missing"
+        assert fields[1].answerability == "unsafe_unknown"
+        return ProposedAction(
+            action_type="ask_user",
+            element_id="field_unknown",
+            question="pause",
+            confidence=0.9,
+            risk="medium",
+            reason="test",
+            source="page",
+        )
+
+    state = await plan_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"contact": {"email": "nitin@example.com"}},
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "paused_for_user"
+    assert state.observation is not None
+    assert state.observation.fields[1].answerability == "unsafe_unknown"
+
+
+async def test_run_external_apply_step_uses_observation_quality_prompt_for_weak_label_pause() -> None:
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="form",
+            fields=[ObservedField(element_id="field_18", label="", field_type="radio", required=True, options=["Yes", "No"])],
+        )
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        return ProposedAction(
+            action_type="set_radio",
+            element_id="field_18",
+            value="Yes",
+            confidence=0.6,
+            risk="medium",
+            reason="Planner guessed an unlabeled yes/no field.",
+            source="page",
+        )
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={},
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "paused_for_user"
+    assert state.pending_user_question is not None
+    assert "could not identify a reliable label for field_18" in state.pending_user_question.question
+    assert "this field" not in state.pending_user_question.question.lower()
 
 
 async def test_plan_external_apply_step_splits_compound_user_question_into_field_questions() -> None:
@@ -392,6 +480,56 @@ async def test_run_external_apply_step_uploads_generated_cover_letter_before_pla
     assert executed[0].action_type == "upload_file"
     assert executed[0].element_id == "field_cover"
     assert executed[0].value == str(cover_letter_path)
+
+
+async def test_run_external_apply_step_selects_cover_letter_upload_mode_before_planner(tmp_path) -> None:
+    cover_letter_path = tmp_path / "cover-letter.txt"
+    cover_letter_path.write_text("Dear Hiring Team,\n\nI am excited to apply.\n", encoding="utf-8")
+    executed: list[ProposedAction] = []
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return PageObservation(
+            url="https://ats.example/apply",
+            page_type="resume_upload",
+            fields=[
+                ObservedField(
+                    element_id="field_cover_choice",
+                    label="No cover letter",
+                    field_type="radio",
+                    control_kind="native_radio_group",
+                    current_value="No cover letter",
+                    options=[
+                        "No cover letter",
+                        "Upload my cover letter from my computer",
+                        "Write or paste my cover letter",
+                    ],
+                )
+            ],
+        )
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("cover-letter mode should be chosen before the LLM planner")
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(ok=True, action_type=action.action_type, element_id=action.element_id, value_after=action.value)
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"cover_letter_path": str(cover_letter_path)},
+        observe_fn=observe,
+        planner_fn=planner,
+        batch_planner_fn=None,
+        execute_fn=execute,
+    )
+
+    assert state.status == "running"
+    assert executed[0].action_type == "set_radio"
+    assert executed[0].element_id == "field_cover_choice"
+    assert executed[0].value == "Upload my cover letter from my computer"
 
 
 async def test_run_external_apply_step_pastes_generated_cover_letter_before_planner() -> None:
@@ -1142,6 +1280,104 @@ async def test_run_external_apply_step_waits_for_delayed_transition_before_pausi
     assert state.status == "running"
     assert state.pending_user_question is None
     assert executed == [("fill_text", "field_first_name")]
+
+
+async def test_run_external_apply_step_waits_for_delayed_transition_after_first_slow_click() -> None:
+    login_observation = PageObservation(
+        url="https://ats.example/login",
+        page_type="login",
+        fields=[
+            ObservedField(element_id="field_3", label="First Name", field_type="text", current_value="Nitin"),
+            ObservedField(element_id="field_4", label="Last Name", field_type="text", current_value="Datta"),
+            ObservedField(element_id="field_5", label="Email", field_type="email", current_value="nitin@example.com"),
+            ObservedField(element_id="field_6", label="New Password", field_type="password", current_value="[REDACTED]"),
+            ObservedField(element_id="field_7", label="Repeat Password", field_type="password", current_value="[REDACTED]"),
+        ],
+        buttons=[ObservedAction(element_id="button_9", label="Create Profile", kind="submit")],
+    )
+    resume_observation = PageObservation(
+        url="https://ats.example/apply#/step1",
+        page_type="resume_upload",
+        fields=[
+            ObservedField(
+                element_id="field_1",
+                label="Resume *",
+                field_type="file",
+                control_kind="file_upload",
+                required=True,
+            )
+        ],
+        buttons=[ObservedAction(element_id="button_next", label="Continue", kind="submit")],
+    )
+
+    observe_calls = 0
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        nonlocal observe_calls
+        observe_calls += 1
+        if observe_calls == 1:
+            return login_observation
+        return resume_observation
+
+    async def planner(_settings: Any, **kwargs: Any) -> ProposedAction:
+        observation = kwargs["observation"]
+        if observation.page_type == "login":
+            return ProposedAction(
+                action_type="click",
+                element_id="button_9",
+                confidence=0.98,
+                risk="medium",
+                reason="Create profile fields are populated.",
+                source="memory",
+            )
+        return ProposedAction(
+            action_type="upload_file",
+            element_id="field_1",
+            value="C:\\work\\envoy\\profile\\resume.docx",
+            confidence=0.98,
+            risk="low",
+            reason="Upload the configured resume on the newly loaded resume step.",
+            source="profile",
+        )
+
+    def policy(**_kwargs: Any) -> PolicyDecision:
+        return PolicyDecision(decision="allowed", reason="safe")
+
+    executed: list[tuple[str, str | None]] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append((action.action_type, action.element_id))
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url=resume_observation.url if action.action_type == "click" else None,
+            navigated=False,
+            errors=["Current step 1 of 5"] if action.action_type == "click" else [],
+        )
+
+    async def sleep(_seconds: float) -> None:
+        return None
+
+    state = await run_external_apply_step(
+        DummySettings(),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={"resume_path": "C:\\work\\envoy\\profile\\resume.docx"},
+        observe_fn=observe,
+        planner_fn=planner,
+        policy_fn=policy,
+        execute_fn=execute,
+        sleep_fn=sleep,
+    )
+
+    assert observe_calls >= 2
+    assert executed == [("click", "button_9"), ("upload_file", "field_1")]
+    assert state.status == "running"
+    assert state.observation is not None
+    assert state.observation.page_type == "resume_upload"
 
 
 async def test_run_external_apply_step_still_pauses_on_stale_click_after_generic_resume_approval() -> None:
@@ -2094,9 +2330,262 @@ async def test_run_external_apply_step_uses_memory_context_to_create_account_aft
     assert state.memory_context.saved_login_rejected is True
     assert state.memory_context.portal_identity == "secure.workforceready.com.au"
     assert state.memory_context.account_email == "candidate@example.com"
-    assert state.memory_context.credential_available is True
+    assert state.memory_context.credential_available is False
     assert state.memory_context.credential_status == "rejected"
     assert state.completed_actions[-1].proposed_action.source == "memory"
+
+
+async def test_run_external_apply_step_creates_portal_profile_when_no_credential_exists(tmp_path: Path) -> None:
+    observation = PageObservation(
+        url="https://inghams.elmotalent.com.au/careers/default/login/",
+        title="Sign in or Create an account",
+        page_type="login",
+        fields=[
+            ObservedField(element_id="field_1", label="Email Address", field_type="text", required=True),
+            ObservedField(element_id="field_2", label="Password", field_type="password", required=True),
+            ObservedField(element_id="field_3", label="", field_type="text", required=True, invalid=True),
+            ObservedField(element_id="field_4", label="", field_type="text", required=True, invalid=True),
+            ObservedField(element_id="field_5", label="", field_type="email", required=True, invalid=True),
+            ObservedField(element_id="field_6", label="New Password", field_type="password", required=True, invalid=True),
+            ObservedField(element_id="field_7", label="Repeat Password", field_type="password", required=True, invalid=True),
+        ],
+        buttons=[
+            ObservedAction(element_id="button_8", label="Log in", kind="submit"),
+            ObservedAction(element_id="button_9", label="Create Profile", kind="submit"),
+        ],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("create-profile fields should be filled before planner")
+
+    def policy(**_kwargs: Any) -> PolicyDecision:
+        return PolicyDecision(decision="allowed", reason="safe")
+
+    executed: list[ProposedAction] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            value_after=action.value,
+            new_url=observation.url,
+        )
+
+    settings = TempExternalAccountSettings(tmp_path / "external_accounts.json")
+    state = await run_external_apply_step(
+        settings,  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "name": "Nitin Datta",
+            "external_accounts": {"default": {"email": "nitin@example.com", "password": "default-password"}},
+        },
+        observe_fn=observe,
+        planner_fn=planner,
+        policy_fn=policy,
+        execute_fn=execute,
+    )
+
+    assert [action.element_id for action in executed] == ["field_3", "field_4", "field_5", "field_6", "field_7"]
+    assert executed[0].value == "Nitin"
+    assert executed[1].value == "Datta"
+    assert executed[2].value == "nitin@example.com"
+    assert executed[3].value == executed[4].value
+    assert executed[3].source == "memory"
+    assert state.status == "running"
+
+    saved = json.loads(settings.resolved_external_accounts_path.read_text(encoding="utf-8"))
+    portal = saved["portals"]["inghams.elmotalent.com.au"]
+    assert portal["email"] == "nitin@example.com"
+    assert portal["username"] == "nitin@example.com"
+    assert portal["status"] == "pending_creation"
+    assert portal["login_method"] == "password"
+    assert portal["password"] == executed[3].value
+    assert state.memory_context is not None
+    assert state.memory_context.credential_available is False
+
+
+async def test_run_external_apply_step_prefers_apply_without_account_over_profile_creation(
+    tmp_path: Path,
+) -> None:
+    observation = PageObservation(
+        url="https://example-ats.test/apply/login",
+        title="Sign in or Create an account",
+        page_type="login",
+        fields=[
+            ObservedField(element_id="field_1", label="Email Address", field_type="text", required=True),
+            ObservedField(element_id="field_2", label="Password", field_type="password", required=True),
+            ObservedField(element_id="field_3", label="First Name", field_type="text", required=True),
+            ObservedField(element_id="field_4", label="Last Name", field_type="text", required=True),
+            ObservedField(element_id="field_5", label="Email", field_type="email", required=True),
+            ObservedField(element_id="field_6", label="New Password", field_type="password", required=True),
+            ObservedField(element_id="field_7", label="Repeat Password", field_type="password", required=True),
+        ],
+        buttons=[
+            ObservedAction(element_id="button_login", label="Log in", kind="submit"),
+            ObservedAction(element_id="button_guest", label="Apply without creating an account", kind="button"),
+            ObservedAction(element_id="button_create", label="Create Profile", kind="submit"),
+        ],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("apply-without-account should be deterministic")
+
+    executed: list[ProposedAction] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            new_url="https://example-ats.test/apply/form",
+            navigated=True,
+        )
+
+    state = await run_external_apply_step(
+        TempExternalAccountSettings(tmp_path / "external_accounts.json"),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "name": "Nitin Datta",
+            "external_accounts": {"default": {"email": "nitin@example.com", "password": "default-password"}},
+        },
+        observe_fn=observe,
+        planner_fn=planner,
+        execute_fn=execute,
+    )
+
+    assert [action.element_id for action in executed] == ["button_guest"]
+    assert executed[0].source == "page"
+    assert "without-account" in executed[0].reason
+    assert not state.pending_user_questions
+    assert not (tmp_path / "external_accounts.json").exists()
+
+
+async def test_run_external_apply_step_clicks_create_profile_after_generated_fields_are_populated(tmp_path: Path) -> None:
+    account_path = tmp_path / "external_accounts.json"
+    account_path.write_text(
+        json.dumps(
+            {
+                "portals": {
+                    "inghams.elmotalent.com.au": {
+                        "email": "nitin@example.com",
+                        "password": "generated-password",
+                        "status": "pending_creation",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    observation = PageObservation(
+        url="https://inghams.elmotalent.com.au/careers/default/login/",
+        title="Sign in or Create an account",
+        page_type="login",
+        fields=[
+            ObservedField(element_id="field_1", label="Email Address", field_type="text", required=True),
+            ObservedField(element_id="field_2", label="Password", field_type="password", required=True),
+            ObservedField(element_id="field_3", label="", field_type="text", required=True, current_value="Nitin"),
+            ObservedField(element_id="field_4", label="", field_type="text", required=True, current_value="Datta"),
+            ObservedField(element_id="field_5", label="", field_type="email", required=True, current_value="nitin@example.com"),
+            ObservedField(element_id="field_6", label="New Password", field_type="password", required=True, current_value="[REDACTED]"),
+            ObservedField(element_id="field_7", label="Repeat Password", field_type="password", required=True, current_value="[REDACTED]"),
+        ],
+        buttons=[
+            ObservedAction(element_id="button_8", label="Log in", kind="submit"),
+            ObservedAction(element_id="button_9", label="Create Profile", kind="submit"),
+        ],
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("create-profile click should be deterministic")
+
+    executed: list[str | None] = []
+
+    async def execute(_client: Any, _session_key: str, action: ProposedAction) -> ActionResult:
+        executed.append(action.element_id)
+        return ActionResult(
+            ok=True,
+            action_type=action.action_type,
+            element_id=action.element_id,
+            new_url="https://inghams.elmotalent.com.au/careers/default/profile/",
+            navigated=True,
+        )
+
+    state = await run_external_apply_step(
+        TempExternalAccountSettings(account_path),  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "name": "Nitin Datta",
+            "external_accounts": json.loads(account_path.read_text(encoding="utf-8")),
+        },
+        observe_fn=observe,
+        planner_fn=planner,
+        execute_fn=execute,
+    )
+
+    assert executed == ["button_9"]
+    assert state.completed_actions[-1].proposed_action.action_type == "click"
+    assert state.completed_actions[-1].proposed_action.source == "memory"
+
+
+async def test_run_external_apply_step_pauses_for_email_verification_and_marks_portal(tmp_path: Path) -> None:
+    observation = PageObservation(
+        url="https://inghams.elmotalent.com.au/careers/default/verify",
+        title="Verify your email",
+        page_type="login",
+        visible_text="We sent a verification email to nitin@example.com. Please verify your email before continuing.",
+    )
+
+    async def observe(_client: Any, _session_key: str) -> PageObservation:
+        return observation
+
+    async def planner(_settings: Any, **_kwargs: Any) -> ProposedAction:
+        raise AssertionError("email verification should pause before planner")
+
+    settings = TempExternalAccountSettings(tmp_path / "external_accounts.json")
+    state = await run_external_apply_step(
+        settings,  # type: ignore[arg-type]
+        DummyToolClient(),  # type: ignore[arg-type]
+        session_key="session-1",
+        application_id="app-1",
+        profile_facts={
+            "external_accounts": {
+                "default": {"email": "nitin@example.com"},
+                "portals": {
+                    "inghams.elmotalent.com.au": {
+                        "email": "nitin@example.com",
+                        "password": "generated-password",
+                        "status": "pending_creation",
+                    }
+                },
+            }
+        },
+        observe_fn=observe,
+        planner_fn=planner,
+    )
+
+    assert state.status == "email_verification_required"
+    assert state.pending_user_question is not None
+    assert "verification" in state.pending_user_question.question.lower()
+    saved = json.loads(settings.resolved_external_accounts_path.read_text(encoding="utf-8"))
+    assert saved["portals"]["inghams.elmotalent.com.au"]["status"] == "pending_email_verification"
 
 
 async def test_run_external_apply_step_passes_portal_scoped_account_memory_to_planner() -> None:

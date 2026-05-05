@@ -423,6 +423,35 @@ def test_prompt_includes_allowed_actions_and_observation() -> None:
     assert payload["available_facts"]["name"] == "Nitin Datta"
 
 
+def test_prompt_includes_deterministic_field_insights() -> None:
+    observation = PageObservation(
+        url="https://ats.example/apply",
+        title="Apply",
+        fields=[
+            ObservedField(element_id="field_email", label="Email Address", field_type="email", required=True),
+            ObservedField(element_id="field_missing", label="", field_type="text", required=True),
+        ],
+    )
+
+    system, user = build_external_apply_batch_planner_messages(
+        observation=observation,
+        profile_facts={"contact": {"email": "nitin@example.com"}},
+        approved_memory=[],
+        recent_actions=[],
+    )
+    payload = json.loads(user)
+
+    assert "label_quality" in system
+    assert payload["page"]["fields"][0]["profile_fact"] == "email"
+    assert payload["page"]["fields"][0]["answerability"] == "profile"
+    assert payload["page"]["fields"][1]["label_quality"] == "missing"
+    assert payload["page"]["fields"][1]["answerability"] == "unsafe_unknown"
+    assert payload["observation_quality_issues"] == [
+        "field_missing: required field has missing label",
+        "field_missing: required field cannot be safely classified",
+    ]
+
+
 def test_prompt_redacts_external_account_password() -> None:
     observation = PageObservation(
         url="https://ats.example/login",

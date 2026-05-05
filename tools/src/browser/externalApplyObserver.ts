@@ -164,6 +164,97 @@ export function collectExternalApplyObservation(): PageObservation {
     el.closest('fieldset, [class*="question"], [class*="field"], [class*="form-group"], [class*="control"], [class*="input"], form, section, div')
     ?? el;
 
+  const labelCleanup = (value: string, options: string[] = []): string => {
+    let text = cleanText(value, 320)
+      .replace(/\b(required|optional)\b/gi, ' ')
+      .replace(/\*/g, ' ');
+    for (const option of options) {
+      const cleanedOption = cleanText(option, 120);
+      if (!cleanedOption) continue;
+      text = text.replace(new RegExp(`\\b${escapeRegExp(cleanedOption)}\\b`, 'gi'), ' ');
+    }
+    return cleanText(text, 240);
+  };
+
+  const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const looksLikeUsefulLabel = (value: string, options: string[] = []): boolean => {
+    const text = labelCleanup(value, options);
+    if (!text) return false;
+    if (/^(yes|no|male|female|select|choose|open|required|optional)$/i.test(text)) return false;
+    return /[a-z0-9]/i.test(text);
+  };
+
+  const textBeforeElement = (container: Element, el: Element): string => {
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(container);
+      range.setEndBefore(el);
+      return cleanText(range.cloneContents().textContent, 320);
+    } catch {
+      return '';
+    }
+  };
+
+  const contextualLabelFor = (el: Element, options: string[] = []): string => {
+    let anchor: Element = el;
+    let current = nearestContainer(el);
+    for (let depth = 0; current && current !== document.body && depth < 6; depth += 1) {
+      const before = labelCleanup(textBeforeElement(current, anchor), options);
+      if (looksLikeUsefulLabel(before, options)) return before;
+
+      const fullText = cleanText(current.textContent, 520);
+      const lowerText = fullText.toLowerCase();
+      let firstOptionIndex = -1;
+      for (const option of options) {
+        const optionText = cleanText(option, 120).toLowerCase();
+        if (!optionText) continue;
+        const index = lowerText.indexOf(optionText);
+        if (index >= 0 && (firstOptionIndex < 0 || index < firstOptionIndex)) {
+          firstOptionIndex = index;
+        }
+      }
+      const beforeOptions = firstOptionIndex >= 0 ? labelCleanup(fullText.slice(0, firstOptionIndex), options) : '';
+      if (looksLikeUsefulLabel(beforeOptions, options)) return beforeOptions;
+
+      const stripped = labelCleanup(fullText, options);
+      if (looksLikeUsefulLabel(stripped, options) && stripped.length <= 220) return stripped;
+
+      anchor = current;
+      current = current.parentElement ?? current;
+      if (current === anchor) break;
+    }
+    return '';
+  };
+
+  const commonAncestor = (elements: Element[]): Element | null => {
+    if (!elements.length) return null;
+    const firstAncestors: Element[] = [];
+    let current: Element | null = elements[0] ?? null;
+    while (current) {
+      firstAncestors.push(current);
+      current = current.parentElement;
+    }
+    return firstAncestors.find((candidate) => elements.every((el) => candidate.contains(el))) ?? null;
+  };
+
+  const radioGroupContainer = (radios: HTMLInputElement[], options: string[]): Element => {
+    const firstRadio = radios[0];
+    if (!firstRadio) return document.body;
+    const fieldset = firstRadio.closest('fieldset');
+    if (fieldset) return fieldset;
+    let anchor: Element = commonAncestor(radios) ?? nearestContainer(firstRadio);
+    let current: Element | null = anchor;
+    for (let depth = 0; current && current !== document.body && depth < 5; depth += 1) {
+      if (looksLikeUsefulLabel(contextualLabelFor(anchor, options), options)) return current;
+      const fullText = cleanText(current.textContent, 520);
+      if (looksLikeUsefulLabel(labelCleanup(fullText, options), options)) return current;
+      anchor = current;
+      current = current.parentElement;
+    }
+    return commonAncestor(radios) ?? nearestContainer(firstRadio);
+  };
+
   const isFileInput = (el: Element): el is HTMLInputElement =>
     el instanceof window.HTMLInputElement && (el.type?.toLowerCase() || '') === 'file';
 
@@ -211,14 +302,16 @@ export function collectExternalApplyObservation(): PageObservation {
     const fileUploadLabel = input instanceof window.HTMLInputElement ? uploadLabelForInput(input) : '';
     return cleanText(
       explicit?.textContent
-      ?? wrapping?.textContent
-      ?? fieldsetLegend?.textContent
-      ?? fileUploadLabel
-      ?? containerLabel?.textContent
-      ?? input.getAttribute('aria-label')
-      ?? input.getAttribute('placeholder')
-      ?? input.name
-      ?? input.id,
+      || wrapping?.textContent
+      || labelledByText(input)
+      || fieldsetLegend?.textContent
+      || fileUploadLabel
+      || input.getAttribute('aria-label')
+      || input.getAttribute('placeholder')
+      || contextualLabelFor(input)
+      || containerLabel?.textContent
+      || input.name
+      || input.id,
       240,
     );
   };
@@ -403,9 +496,17 @@ export function collectExternalApplyObservation(): PageObservation {
       const groupRadios = inputs
         .filter((candidate): candidate is HTMLInputElement =>
           candidate instanceof window.HTMLInputElement && candidate.type === 'radio' && (candidate.name || candidate.id) === groupName);
-      const container = radio.closest('fieldset') ?? nearestContainer(radio);
+      const options = groupRadios.map(optionLabelFor).filter(Boolean);
+      const container = radioGroupContainer(groupRadios, options);
       const checked = groupRadios.find((candidate) => candidate.checked);
-      const label = cleanText(container.querySelector('legend')?.textContent ?? labelForInput(radio), 240);
+      const label = cleanText(
+        container.querySelector('legend')?.textContent
+        || labelledByText(container)
+        || contextualLabelFor(container, options)
+        || contextualLabelFor(radio, options)
+        || labelForInput(radio),
+        240,
+      );
       const required = groupRadios.some((candidate) => candidate.required) || textNear(container).toLowerCase().includes('required');
       const invalid = required && !checked;
       fields.push({
@@ -415,7 +516,7 @@ export function collectExternalApplyObservation(): PageObservation {
         control_kind: 'native_radio_group',
         required,
         current_value: checked ? optionLabelFor(checked) : null,
-        options: groupRadios.map(optionLabelFor).filter(Boolean),
+        options,
         nearby_text: textNear(container),
         disabled: groupRadios.every((candidate) => candidate.disabled),
         visible: true,

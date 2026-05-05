@@ -164,6 +164,73 @@ describe('collectExternalApplyObservation', () => {
     expect(observation.fields[0]?.options).toEqual(['Yes', 'No']);
   });
 
+  it('recovers labels from question rows when controls are nested in unlabeled wrappers', () => {
+    const observation = withDom(
+      `
+      <html>
+        <body>
+          <form>
+            <div class="profile-field">
+              <div class="field-label">Email Address *</div>
+              <div class="input-wrapper"><input type="email" required /></div>
+            </div>
+            <div class="profile-field">
+              <div class="field-label">Mobile Phone *</div>
+              <div class="input-wrapper"><input type="tel" required /></div>
+            </div>
+            <div class="profile-field">
+              <div class="question-text">Do you currently hold the right to work in Australia?</div>
+              <div class="radio-list">
+                <div class="radio-option">
+                  <input id="rights_yes" name="rights" type="radio" required value="yes" />
+                  <label for="rights_yes">Yes</label>
+                </div>
+                <div class="radio-option">
+                  <input id="rights_no" name="rights" type="radio" required value="no" />
+                  <label for="rights_no">No</label>
+                </div>
+              </div>
+            </div>
+            <div class="profile-field">
+              <div class="question-text">
+                Do you identify as Aboriginal/Torres Strait Islander? (relevant for Australian applicants only)
+              </div>
+              <div class="radio-list">
+                <div class="radio-option">
+                  <input id="atsi_yes" name="atsi" type="radio" required value="yes" />
+                  <label for="atsi_yes">Yes</label>
+                </div>
+                <div class="radio-option">
+                  <input id="atsi_no" name="atsi" type="radio" required value="no" />
+                  <label for="atsi_no">No</label>
+                </div>
+                <div class="radio-option">
+                  <input id="atsi_prefer" name="atsi" type="radio" required value="prefer_not" />
+                  <label for="atsi_prefer">Prefer not to answer</label>
+                </div>
+                <div class="radio-option">
+                  <input id="atsi_na" name="atsi" type="radio" required value="na" />
+                  <label for="atsi_na">Not applicable</label>
+                </div>
+              </div>
+            </div>
+          </form>
+        </body>
+      </html>
+      `,
+      () => collectExternalApplyObservation(),
+    );
+
+    expect(observation.fields.find((field) => field.field_type === 'email')?.label).toBe('Email Address');
+    expect(observation.fields.find((field) => field.field_type === 'phone')?.label).toBe('Mobile Phone');
+    expect(observation.fields.find((field) => field.options.join('|') === 'Yes|No')?.label).toBe(
+      'Do you currently hold the right to work in Australia?',
+    );
+    expect(observation.fields.find((field) => field.options.includes('Prefer not to answer'))?.label).toBe(
+      'Do you identify as Aboriginal/Torres Strait Islander? (relevant for Australian applicants only)',
+    );
+  });
+
   it('observes custom aria radio groups with labels and selected value', () => {
     const observation = withDom(
       `

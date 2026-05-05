@@ -245,6 +245,10 @@ function escapeCssIdent(ident: string): string {
   return ident.replace(/([^a-zA-Z0-9_-])/g, '\\$1');
 }
 
+function escapeCssString(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
 async function captureFailureArtifacts(
   page: Page,
   action: ExternalApplyAction,
@@ -309,12 +313,18 @@ function mergeDiagnostics(
 
 async function clickRadioOption(page: Page, elementId: string, value: string): Promise<void> {
   const radios = page.locator(`${elementIdSelector(elementId)} input[type="radio"]`);
-  const count = await radios.count();
+  let count = await radios.count();
+  let radioGroup = radios;
+  if (count) {
+    const expanded = await expandNativeRadioGroupByName(page, radios, count);
+    radioGroup = expanded.radios;
+    count = expanded.count;
+  }
   if (count) {
     const candidates = radioValueCandidates(value);
-    const entries: { radio: ReturnType<typeof radios.nth>; label: string; inputValue: string; inputId: string }[] = [];
+    const entries: { radio: ReturnType<typeof radioGroup.nth>; label: string; inputValue: string; inputId: string }[] = [];
     for (let index = 0; index < count; index += 1) {
-      const radio = radios.nth(index);
+      const radio = radioGroup.nth(index);
       const { label, inputValue, inputId } = await radio.evaluate((node) => {
         const input = node as HTMLInputElement;
         const explicit = input.id ? document.querySelector(`label[for="${input.id}"]`) : null;
@@ -397,6 +407,28 @@ async function clickRadioOption(page: Page, elementId: string, value: string): P
 
   const available = entries.map((entry) => entry.label || entry.inputValue).filter(Boolean).join(', ');
   throw new Error(`No radio option matching "${value}"${available ? ` (options: ${available})` : ''}`);
+}
+
+async function expandNativeRadioGroupByName(
+  page: Page,
+  scopedRadios: Locator,
+  scopedCount: number,
+): Promise<{ radios: Locator; count: number }> {
+  const rawGroupName = await scopedRadios.nth(0).evaluate((node) => {
+    const input = node as HTMLInputElement;
+    return (input.name ?? '').trim();
+  }).catch(() => '');
+  const groupName = typeof rawGroupName === 'string' ? rawGroupName.trim() : '';
+  if (!groupName) {
+    return { radios: scopedRadios, count: scopedCount };
+  }
+
+  const groupRadios = page.locator(`input[type="radio"][name="${escapeCssString(groupName)}"]`);
+  const groupCount = await groupRadios.count().catch(() => 0);
+  if (groupCount > scopedCount) {
+    return { radios: groupRadios, count: groupCount };
+  }
+  return { radios: scopedRadios, count: scopedCount };
 }
 
 function radioValueCandidates(value: string): string[] {

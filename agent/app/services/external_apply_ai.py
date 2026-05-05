@@ -15,6 +15,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from app.services.external_apply_enrichment import enrich_page_observation, observation_quality_issues
 from app.services.run_events import current_node as _current_node
 from app.services.run_events import current_run_id as _current_run_id
 from app.services.run_events import emit as _emit
@@ -228,6 +229,8 @@ def build_external_apply_planner_messages(
         "You do not operate the browser. You propose exactly one next browser action as JSON. "
         "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
+        "Use each field's label_quality, profile_fact, document_kind, sensitivity, and answerability insights "
+        "as deterministic context; do not override unsafe_unknown or user_required insights without approved data. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
         "For career narrative and profile-grounded experience questions, draft a concise tailored answer grounded "
         "only in available_facts and observed page/job context; use source profile or inferred. This includes "
@@ -252,8 +255,10 @@ def build_external_apply_planner_messages(
         "\"confidence\":0.0,\"risk\":\"low|medium|high\",\"reason\":\"...\","
         "\"source\":\"profile|memory|user|inferred|page|none\"}."
     )
+    enriched_observation = enrich_page_observation(observation, profile_facts, approved_memory)
     payload = {
-        "page": _observation_for_prompt(observation),
+        "page": _observation_for_prompt(enriched_observation),
+        "observation_quality_issues": observation_quality_issues(enriched_observation),
         "planning_frame": planning_frame or {},
         "available_facts": _available_facts_for_prompt(profile_facts),
         "memory_context": memory_context or {},
@@ -279,6 +284,8 @@ def build_external_apply_batch_planner_messages(
         "You do not operate the browser. You propose a page plan as JSON. "
         "Use only observed element_id values from page.fields, page.uploads, page.buttons, or page.links. "
         "Follow planning_frame strategies, hints, recommended_actions, and blocked_actions. "
+        "Use each field's label_quality, profile_fact, document_kind, sensitivity, and answerability insights "
+        "as deterministic context; do not override unsafe_unknown or user_required insights without approved data. "
         "Use only available_facts, approved_memory, or explicit user-sourced recent actions for form values. "
         "Prefer safe field actions before navigation, skip fields that already have useful current_value, "
         "and draft career narrative or profile-grounded experience answers when available_facts and observed "
@@ -307,8 +314,10 @@ def build_external_apply_batch_planner_messages(
         "\"source\":\"profile|memory|user|inferred|page|none\"}]}. "
         "Return at most 12 actions."
     )
+    enriched_observation = enrich_page_observation(observation, profile_facts, approved_memory)
     payload = {
-        "page": _observation_for_prompt(observation),
+        "page": _observation_for_prompt(enriched_observation),
+        "observation_quality_issues": observation_quality_issues(enriched_observation),
         "planning_frame": planning_frame or {},
         "available_facts": _available_facts_for_prompt(profile_facts),
         "memory_context": memory_context or {},

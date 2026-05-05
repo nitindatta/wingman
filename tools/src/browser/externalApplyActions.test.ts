@@ -980,6 +980,60 @@ describe('external apply action helpers', () => {
     expect(groupClick).not.toHaveBeenCalled();
   });
 
+  it('selects sibling native radio options that share the tagged radio name', async () => {
+    const uploadCheck = vi.fn(async () => {});
+    const scopedRadios = {
+      count: vi.fn(async () => 1),
+      nth: vi.fn(() => ({
+        evaluate: vi.fn(async () => 'optionsCoverLetter'),
+      })),
+    };
+    const groupEntries = [
+      {
+        check: vi.fn(async () => {}),
+        evaluate: vi.fn(async () => ({ label: 'No cover letter', inputValue: '0', inputId: '' })),
+      },
+      {
+        check: uploadCheck,
+        evaluate: vi.fn(async () => ({
+          label: 'Upload my cover letter from my computer',
+          inputValue: '1',
+          inputId: '',
+        })),
+      },
+      {
+        check: vi.fn(async () => {}),
+        evaluate: vi.fn(async () => ({ label: 'Write or paste my cover letter', inputValue: '2', inputId: '' })),
+      },
+    ];
+    const groupRadios = {
+      count: vi.fn(async () => groupEntries.length),
+      nth: (index: number) => groupEntries[index],
+    };
+    const target = {
+      first: () => target,
+      count: vi.fn(async () => 1),
+      evaluate: vi.fn(async () => ({ nativeCheckbox: false, ariaCheckbox: false, checked: false })),
+    };
+    const page = {
+      url: () => 'https://ats.example/apply',
+      locator: (selector: string) => {
+        if (selector === '[data-envoy-apply-id="field_2"] input[type="radio"]') return scopedRadios;
+        if (selector === 'input[type="radio"][name="optionsCoverLetter"]') return groupRadios;
+        return target;
+      },
+      waitForTimeout: vi.fn(async () => {}),
+    };
+
+    const result = await executeExternalApplyAction(
+      page as never,
+      { action_type: 'set_radio', element_id: 'field_2', value: 'Upload my cover letter from my computer' },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(uploadCheck).toHaveBeenCalledTimes(1);
+  });
+
   it('dismisses transient popovers before selecting the next radio option', async () => {
     const radioCheck = vi.fn(async () => {});
     const radioEntries = [

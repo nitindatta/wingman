@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
+import secrets
+import string
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
 from app.persistence.sqlite.question_cache import SqliteQuestionCacheRepository
 from app.services.external_apply_ai import propose_external_apply_action, propose_external_apply_actions
+from app.services.external_apply_enrichment import enrich_page_observation, observation_quality_issues
 from app.services.run_events import emit as _emit
 from app.services.external_apply_policy import (
     should_default_check_consent_field,
@@ -62,8 +67,22 @@ async def plan_external_apply_step(
 
     memory = approved_memory or []
     traces = recent_actions or []
-    observation = await observe_fn(tool_client, session_key)
+    observation = enrich_page_observation(
+        await observe_fn(tool_client, session_key),
+        profile_facts,
+        memory,
+    )
     memory_context = _derive_external_memory_context(observation, profile_facts, traces)
+    existing_account_state = _existing_account_detected_state(
+        settings,
+        application_id,
+        observation,
+        profile_facts,
+        traces,
+        memory_context,
+    )
+    if existing_account_state is not None:
+        return existing_account_state
     planning_frame = _build_planning_frame(observation, profile_facts, memory_context)
     effective_memory = _approved_memory_with_recent_answers(
         [*memory, *await _cached_approved_memory_for_observation(observation, question_cache)],
@@ -136,10 +155,34 @@ async def run_external_apply_step(
         else ""
     )
     last_result: ActionResult | None = None
-    observation = await observe_fn(tool_client, session_key)
+    observation = enrich_page_observation(
+        await observe_fn(tool_client, session_key),
+        profile_facts,
+        memory,
+    )
 
     for transaction_pass in range(MAX_TRANSACTION_PASSES):
         memory_context = _derive_external_memory_context(observation, profile_facts, completed_actions)
+        existing_account_state = _existing_account_detected_state(
+            settings,
+            application_id,
+            observation,
+            profile_facts,
+            completed_actions,
+            memory_context,
+        )
+        if existing_account_state is not None:
+            return existing_account_state
+        email_verification_state = _email_verification_required_state(
+            settings,
+            application_id,
+            observation,
+            profile_facts,
+            completed_actions,
+            memory_context,
+        )
+        if email_verification_state is not None:
+            return email_verification_state
         planning_frame = _build_planning_frame(observation, profile_facts, memory_context)
         _emit("observe", f"observe: {observation.page_type} @ {observation.url[:70]}", {
             "url": observation.url,
@@ -152,11 +195,17 @@ async def run_external_apply_step(
                     "label": f.label,
                     "type": f.field_type,
                     "control_kind": f.control_kind,
+                    "label_quality": f.label_quality,
+                    "profile_fact": f.profile_fact,
+                    "document_kind": f.document_kind,
+                    "sensitivity": f.sensitivity,
+                    "answerability": f.answerability,
                     "invalid": f.invalid,
                     "validation_message": f.validation_message,
                 }
                 for f in observation.fields[:10]
             ],
+            "observation_quality_issues": observation_quality_issues(observation),
             "buttons": [{"id": b.element_id, "label": b.label} for b in observation.buttons[:6]],
             "visible_text": (observation.visible_text or "")[:200],
             "transaction_pass": transaction_pass + 1,
@@ -196,7 +245,7 @@ async def run_external_apply_step(
             _emit("plan", f"plan: {action.action_type}", {
                 "action_type": action.action_type,
                 "element_id": action.element_id,
-                "value": (action.value or "")[:80],
+                "value": _action_value_for_event(observation, action),
                 "confidence": action.confidence,
                 "risk": action.risk,
                 "reason": action.reason,
@@ -238,6 +287,11 @@ async def run_external_apply_step(
                 sleep_fn,
             )
             if delayed_transition_observation is not None:
+                delayed_transition_observation = enrich_page_observation(
+                    delayed_transition_observation,
+                    profile_facts,
+                    memory,
+                )
                 current_url = delayed_transition_observation.url or current_url or observation.url
                 last_state = planned.model_copy(
                     update={
@@ -343,7 +397,7 @@ async def run_external_apply_step(
             _emit("execute", f"execute: {planned.proposed_action.action_type} -> {'ok' if result.ok else 'fail'}", {
                 "action_type": planned.proposed_action.action_type,
                 "element_id": planned.proposed_action.element_id,
-                "value": (planned.proposed_action.value or "")[:80],
+                "value": _action_value_for_event(observation, planned.proposed_action),
                 "ok": result.ok,
                 "message": result.message,
                 "new_url": result.new_url,
@@ -377,6 +431,23 @@ async def run_external_apply_step(
                 mutated_current_page = True
 
             if planned.proposed_action.action_type == "click":
+                delayed_transition_observation = await _observe_delayed_transition_after_click(
+                    observation,
+                    planned.proposed_action,
+                    result,
+                    tool_client,
+                    session_key,
+                    observe_fn,
+                    sleep_fn,
+                )
+                if delayed_transition_observation is not None:
+                    delayed_transition_observation = enrich_page_observation(
+                        delayed_transition_observation,
+                        profile_facts,
+                        memory,
+                    )
+                    current_url = delayed_transition_observation.url or current_url or observation.url
+                    break
                 return last_state
 
         if last_state is None:
@@ -405,7 +476,11 @@ async def run_external_apply_step(
         if not mutated_current_page or transaction_pass + 1 >= MAX_TRANSACTION_PASSES:
             return last_state
 
-        next_observation = await observe_fn(tool_client, session_key)
+        next_observation = enrich_page_observation(
+            await observe_fn(tool_client, session_key),
+            profile_facts,
+            memory,
+        )
         current_url = next_observation.url or current_url
         if _same_page_shape(next_observation, observation):
             return last_state
@@ -451,6 +526,17 @@ async def _planned_actions_for_observation(
     preapproved_consent_action = _preapproved_generic_consent_action(observation, recent_actions, profile_facts)
     if preapproved_consent_action is not None:
         return [preapproved_consent_action]
+    preapproved_guest_apply_action = _preapproved_apply_without_account_action(observation, memory_context)
+    if preapproved_guest_apply_action is not None:
+        return [preapproved_guest_apply_action]
+    preapproved_account_creation_actions = _preapproved_account_creation_actions(
+        settings,
+        observation,
+        memory_context,
+        profile_facts,
+    )
+    if preapproved_account_creation_actions:
+        return preapproved_account_creation_actions
     preapproved_account_action = _preapproved_account_route_action(observation, memory_context)
     if preapproved_account_action is not None:
         return [preapproved_account_action]
@@ -458,6 +544,9 @@ async def _planned_actions_for_observation(
         [*approved_memory, *await _cached_approved_memory_for_observation(observation, question_cache)],
         recent_actions,
     )
+    quality_gate_actions = _observation_quality_gate_actions(observation)
+    if quality_gate_actions:
+        return quality_gate_actions
 
     effective_batch_planner = batch_planner_fn
     if effective_batch_planner is None and planner_fn is propose_external_apply_action:
@@ -484,6 +573,46 @@ async def _planned_actions_for_observation(
             memory_context=memory_context.model_dump(),
             planning_frame=planning_frame.model_dump(),
         )
+    ] 
+
+
+def _observation_quality_gate_actions(observation: PageObservation) -> list[ProposedAction]:
+    unresolved_required = [
+        field
+        for field in observation.fields
+        if field.required
+        and field.visible
+        and not field.disabled
+        and not _field_has_useful_value(field)
+    ]
+    if not unresolved_required:
+        return []
+    safe_remaining = [
+        field
+        for field in unresolved_required
+        if getattr(field, "answerability", None) in {"profile", "memory", "inferable"}
+    ]
+    if safe_remaining:
+        return []
+    unsafe_unknown = [
+        field
+        for field in unresolved_required
+        if getattr(field, "answerability", None) == "unsafe_unknown"
+    ]
+    return [
+        ProposedAction(
+            action_type="ask_user",
+            element_id=field.element_id,
+            question=_question_for_field(field),
+            confidence=0.99,
+            risk="medium",
+            reason=(
+                "Observation quality gate: this required field is visible, unresolved, "
+                "and cannot be safely classified from the page observation."
+            ),
+            source="page",
+        )
+        for field in unsafe_unknown[:8]
     ]
 
 
@@ -539,8 +668,12 @@ def _derive_external_memory_context(
     account_mode = _portal_account_mode(profile_facts, portal_host)
     account_status = _portal_account_status(portal_account)
     account_email = _portal_account_email(profile_facts, portal_account)
-    credential_available = _has_default_external_login(profile_facts) or bool(_portal_account_password(portal_account))
     credential_status = _portal_credential_status(portal_account, saved_login_rejected)
+    credential_available = _portal_credential_available(
+        portal_account,
+        account_status=account_status,
+        credential_status=credential_status,
+    )
     recommendations: list[str] = []
     rejected_attempts: list[dict[str, str]] = []
     recent_failures = _recent_executor_failures(recent_actions)
@@ -549,8 +682,16 @@ def _derive_external_memory_context(
         recommendations.append(
             "No portal-specific account memory exists yet; treat login/account creation as scoped to this portal host."
         )
+        if create_account_available:
+            recommendations.append(
+                "No portal-specific credential exists and a create-profile/account path is visible; create a portal-specific account instead of asking for a login password."
+            )
     elif account_status:
         recommendations.append(f"Portal account memory status is {account_status}.")
+        if _portal_account_needs_user_credential(account_status, credential_status):
+            recommendations.append(
+                "Portal account already exists or needs recovery; do not retry create-profile. Ask the user to sign in, reset the password, or provide a verified credential."
+            )
 
     if saved_login_rejected:
         rejected_attempts.append(
@@ -613,6 +754,17 @@ def _build_planning_frame(
         blocked_actions.append("retry_rejected_default_password")
     if memory_context.create_account_available:
         hints.append("create_account_visible")
+    guest_apply_action = _find_apply_without_account_action(observation)
+    if guest_apply_action is not None:
+        hints.append("apply_without_account_available")
+    if (
+        observation.page_type == "login"
+        and memory_context.create_account_available
+        and guest_apply_action is None
+        and not memory_context.credential_available
+    ):
+        hints.append("create_portal_profile_when_no_portal_credential_exists")
+        blocked_actions.append("ask_user_for_login_password_when_create_profile_is_available")
     if observation.page_type == "login":
         blocked_actions.append("stop_ready_to_submit_on_login")
     if _profile_path_value(profile_facts, "resume_path"):
@@ -627,7 +779,31 @@ def _build_planning_frame(
         hints.append("manual_entry_preferred_when_cv_parse_choice_has_no_direct_file_input")
 
     create_account_action = _find_create_account_action(observation)
-    if memory_context.saved_login_rejected and create_account_action is not None:
+    if (
+        observation.page_type == "login"
+        and create_account_action is not None
+        and guest_apply_action is None
+        and not memory_context.credential_available
+        and not memory_context.saved_login_rejected
+    ):
+        recommended_actions.append(
+            {
+                "action_type": "create_portal_profile",
+                "element_id": create_account_action.element_id,
+                "reason": "No portal-specific credential exists and create-profile/account is visible.",
+                "source": "memory",
+            }
+        )
+    if observation.page_type == "login" and guest_apply_action is not None:
+        recommended_actions.append(
+            {
+                "action_type": "click",
+                "element_id": guest_apply_action.element_id,
+                "reason": "An apply-without-account path is visible; prefer it over creating a new portal account.",
+                "source": "page",
+            }
+        )
+    if memory_context.saved_login_rejected and create_account_action is not None and guest_apply_action is None:
         recommended_actions.append(
             {
                 "action_type": "click",
@@ -712,6 +888,8 @@ def _has_resume_upload(observation: PageObservation) -> bool:
 
 
 def _looks_like_resume_upload_field(field: Any) -> bool:
+    if getattr(field, "document_kind", None) == "resume":
+        return True
     text = " ".join([field.label or "", field.nearby_text or ""]).lower()
     return (field.field_type or "").strip().lower() == "file" and bool(
         re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", text)
@@ -719,7 +897,24 @@ def _looks_like_resume_upload_field(field: Any) -> bool:
 
 
 def _looks_like_cover_letter_field(field: Any) -> bool:
+    if getattr(field, "document_kind", None) == "cover_letter":
+        return True
     text = " ".join([field.label or "", field.nearby_text or ""]).lower()
+    return bool(re.search(r"\bcover\s+letter\b", text))
+
+
+def _looks_like_cover_letter_choice_field(field: Any) -> bool:
+    field_type = (field.field_type or "").strip().lower()
+    control_kind = (field.control_kind or "").strip().lower()
+    if field_type not in {"radio", "select"} and control_kind not in {"native_radio_group", "native_select", "select"}:
+        return False
+    text = " ".join(
+        [
+            field.label or "",
+            field.nearby_text or "",
+            *[str(option) for option in (getattr(field, "options", None) or [])],
+        ]
+    ).lower()
     return bool(re.search(r"\bcover\s+letter\b", text))
 
 
@@ -764,6 +959,457 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(text)
         deduped.append(text)
     return deduped
+
+
+def _existing_account_detected_state(
+    settings: Settings,
+    application_id: str,
+    observation: PageObservation,
+    profile_facts: dict[str, Any],
+    completed_actions: list[ActionTrace],
+    memory_context: ExternalApplyMemoryContext,
+) -> ExternalApplyState | None:
+    if not _looks_like_existing_account_error(observation):
+        return None
+    apply_without_account = _find_apply_without_account_action(observation)
+    if apply_without_account is not None and not apply_without_account.disabled:
+        return None
+
+    if memory_context.portal_host:
+        portal_account = _ensure_portal_account_record(profile_facts, memory_context.portal_host)
+        email = memory_context.account_email or _portal_account_email(profile_facts, portal_account)
+        portal_account.update(
+            {
+                "email": email,
+                "username": email,
+                "login_method": portal_account.get("login_method") or "password",
+                "account_mode": "login",
+                "status": "existing_account_detected",
+                "credential_status": "needs_user",
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        _persist_external_accounts(settings, profile_facts)
+        memory_context = _derive_external_memory_context(observation, profile_facts, completed_actions)
+
+    question = UserQuestion(
+        question="This portal says an account already exists for this email.",
+        context=(
+            "Create-profile cannot continue safely with the generated password. "
+            "Please sign in, reset the password, or add a verified portal credential, then resume this application."
+        ),
+        question_key=_question_key_for_prompt("existing_account_detected", observation.url),
+    )
+    return ExternalApplyState(
+        application_id=application_id,
+        current_url=observation.url,
+        page_type=observation.page_type,
+        observation=observation,
+        memory_context=memory_context,
+        planning_frame=_build_planning_frame(observation, profile_facts, memory_context),
+        completed_actions=completed_actions,
+        status="paused_for_user",
+        pending_user_question=question,
+        pending_user_questions=[question],
+        risk_flags=["existing_account_detected", "portal_credential_required"],
+    )
+
+
+def _looks_like_existing_account_error(observation: PageObservation) -> bool:
+    parts = [
+        observation.title or "",
+        observation.visible_text or "",
+        *observation.errors,
+        *[
+            str(getattr(field, "validation_message", "") or "")
+            for field in observation.fields
+            if getattr(field, "validation_message", None)
+        ],
+    ]
+    text = _normalize_memory_text(" ".join(parts))
+    if not text:
+        return False
+    patterns = [
+        r"\b(?:email|e mail|account|user|username)\b.{0,80}\balready\b.{0,80}\b(?:registered|used|exists|exist|in use)\b",
+        r"\balready\b.{0,80}\b(?:registered|used|exists|exist|in use)\b.{0,80}\b(?:email|e mail|account|user|username)\b",
+    ]
+    return any(re.search(pattern, text) for pattern in patterns)
+
+
+def _email_verification_required_state(
+    settings: Settings,
+    application_id: str,
+    observation: PageObservation,
+    profile_facts: dict[str, Any],
+    completed_actions: list[ActionTrace],
+    memory_context: ExternalApplyMemoryContext,
+) -> ExternalApplyState | None:
+    if not _looks_like_email_verification_required(observation):
+        return None
+    if memory_context.portal_host:
+        portal_account = _ensure_portal_account_record(profile_facts, memory_context.portal_host)
+        portal_account.update(
+            {
+                "email": memory_context.account_email,
+                "username": memory_context.account_email,
+                "login_method": portal_account.get("login_method") or "password",
+                "account_mode": portal_account.get("account_mode") or "create",
+                "status": "pending_email_verification",
+                "credential_status": portal_account.get("credential_status") or "generated",
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        _persist_external_accounts(settings, profile_facts)
+        memory_context = _derive_external_memory_context(observation, profile_facts, completed_actions)
+
+    question = UserQuestion(
+        question="Email verification is required before this application can continue.",
+        context=(
+            "Please complete the verification step in the browser or email inbox. "
+            "After verification is complete, resume this application and Envoy will continue from the current session."
+        ),
+        question_key=_question_key_for_prompt("email_verification_required", observation.url),
+    )
+    return ExternalApplyState(
+        application_id=application_id,
+        current_url=observation.url,
+        page_type=observation.page_type,
+        observation=observation,
+        memory_context=memory_context,
+        planning_frame=_build_planning_frame(observation, profile_facts, memory_context),
+        completed_actions=completed_actions,
+        status="email_verification_required",
+        pending_user_question=question,
+        pending_user_questions=[question],
+        risk_flags=["email_verification_required"],
+    )
+
+
+def _looks_like_email_verification_required(observation: PageObservation) -> bool:
+    text = " ".join([observation.title or "", observation.visible_text or "", *observation.errors[:6]]).lower()
+    if not re.search(r"\b(email|e-mail|mailbox|inbox)\b", text):
+        return False
+    return bool(
+        re.search(
+            r"\b(verify|verification|confirm|confirmation|activate|activation|one[-\s]?time|code)\b",
+            text,
+        )
+        or re.search(r"\b(check|sent|send|mailed).{0,80}\b(email|e-mail|mailbox|inbox)\b", text)
+    )
+
+
+def _preapproved_account_creation_actions(
+    settings: Settings,
+    observation: PageObservation,
+    memory_context: ExternalApplyMemoryContext,
+    profile_facts: dict[str, Any],
+) -> list[ProposedAction]:
+    if observation.page_type != "login":
+        return []
+    if _find_apply_without_account_action(observation) is not None:
+        return []
+    pending_creation_statuses = {"pending_creation", "pending_profile_creation", "pending_account_creation"}
+    if _portal_account_needs_user_credential(memory_context.account_status, memory_context.credential_status):
+        return []
+    if memory_context.credential_available and memory_context.account_status not in pending_creation_statuses:
+        return []
+    create_action = _find_create_account_action(observation)
+    if create_action is None or create_action.disabled:
+        return []
+
+    targets = _create_account_field_targets(observation)
+    if not targets.can_create_account:
+        return []
+
+    first_name, last_name = _profile_first_last_name(profile_facts)
+    email = memory_context.account_email or _portal_account_email(profile_facts, None)
+    password = _get_or_create_portal_password(
+        settings,
+        profile_facts,
+        memory_context.portal_host,
+        email,
+        status="pending_creation",
+    )
+    values_by_key = {
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": email,
+        "password": password,
+        "repeat_password": password,
+    }
+
+    actions: list[ProposedAction] = []
+    for key in ("first_name", "last_name", "email", "password", "repeat_password"):
+        field = targets.fields.get(key)
+        value = values_by_key.get(key)
+        if field is None or not value:
+            continue
+        if _field_has_useful_value(field):
+            continue
+        actions.append(
+            ProposedAction(
+                action_type="fill_text",
+                element_id=field.element_id,
+                value=str(value),
+                confidence=0.99,
+                risk="medium" if "password" in key else "low",
+                reason=(
+                    "Create a portal-specific account because no saved credential exists for this portal. "
+                    f"Fill the create-profile {key.replace('_', ' ')} field from generated portal account memory."
+                ),
+                source="memory",
+            )
+        )
+
+    if actions:
+        return actions
+
+    return [
+        ProposedAction(
+            action_type="click",
+            element_id=create_action.element_id,
+            confidence=0.98,
+            risk="medium",
+            reason=(
+                "Create-profile fields are populated using a newly generated portal-specific credential; "
+                "submit the observed create-profile/account action."
+            ),
+            source="memory",
+        )
+    ]
+
+
+def _preapproved_apply_without_account_action(
+    observation: PageObservation,
+    memory_context: ExternalApplyMemoryContext,
+) -> ProposedAction | None:
+    if observation.page_type != "login":
+        return None
+    if memory_context.credential_available and memory_context.account_status not in {
+        "pending_creation",
+        "pending_profile_creation",
+        "pending_account_creation",
+    }:
+        return None
+    action = _find_apply_without_account_action(observation)
+    if action is None or action.disabled:
+        return None
+    return ProposedAction(
+        action_type="click",
+        element_id=action.element_id,
+        confidence=0.98,
+        risk="low",
+        reason="An apply-without-account path is visible; use it instead of creating a portal account.",
+        source="page",
+    )
+
+
+class _CreateAccountTargets:
+    def __init__(self, fields: dict[str, Any]) -> None:
+        self.fields = fields
+
+    @property
+    def can_create_account(self) -> bool:
+        return bool(
+            self.fields.get("email")
+            and self.fields.get("password")
+            and self.fields.get("repeat_password")
+        )
+
+
+def _create_account_field_targets(observation: PageObservation) -> _CreateAccountTargets:
+    fields = [field for field in observation.fields if field.visible and not field.disabled]
+    login_password_index = next(
+        (
+            index
+            for index, field in enumerate(fields)
+            if _looks_like_plain_login_password_field(field)
+        ),
+        -1,
+    )
+    create_fields = fields[login_password_index + 1 :] if login_password_index >= 0 else fields
+
+    by_key: dict[str, Any] = {}
+    for field in create_fields:
+        label = _field_text(field)
+        if "repeat_password" not in by_key and re.search(r"\b(repeat|confirm|verify).*\b(pass(word|phrase)?)\b", label):
+            by_key["repeat_password"] = field
+            continue
+        if "password" not in by_key and re.search(r"\b(new\s+)?pass(word|phrase)?\b", label):
+            by_key["password"] = field
+            continue
+        if "email" not in by_key and (field.field_type or "").strip().lower() == "email":
+            by_key["email"] = field
+            continue
+        if "email" not in by_key and re.search(r"\be-?mail\b", label):
+            by_key["email"] = field
+            continue
+        if "first_name" not in by_key and re.search(r"\b(first|given)\s+name\b", label):
+            by_key["first_name"] = field
+            continue
+        if "last_name" not in by_key and re.search(r"\b(last|family|surname)\s+name\b", label):
+            by_key["last_name"] = field
+
+    if "email" not in by_key:
+        for field in create_fields:
+            if (field.field_type or "").strip().lower() == "email":
+                by_key["email"] = field
+                break
+
+    unnamed_text_fields = [
+        field
+        for field in create_fields
+        if field.element_id not in {candidate.element_id for candidate in by_key.values()}
+        and (field.field_type or "").strip().lower() in {"text", ""}
+        and not (field.label or "").strip()
+    ]
+    if "first_name" not in by_key and unnamed_text_fields:
+        by_key["first_name"] = unnamed_text_fields[0]
+    if "last_name" not in by_key and len(unnamed_text_fields) > 1:
+        by_key["last_name"] = unnamed_text_fields[1]
+
+    password_fields = [
+        field
+        for field in create_fields
+        if (field.field_type or "").strip().lower() == "password"
+    ]
+    if "password" not in by_key and password_fields:
+        by_key["password"] = password_fields[0]
+    if "repeat_password" not in by_key and len(password_fields) > 1:
+        by_key["repeat_password"] = password_fields[1]
+
+    return _CreateAccountTargets(by_key)
+
+
+def _looks_like_plain_login_password_field(field: Any) -> bool:
+    label = str(getattr(field, "label", "") or "").strip().lower()
+    if (field.field_type or "").strip().lower() != "password":
+        return False
+    return bool(re.fullmatch(r"(password|passphrase)", label))
+
+
+def _field_text(field: Any) -> str:
+    return " ".join(
+        [
+            str(getattr(field, "label", "") or ""),
+            str(getattr(field, "nearby_text", "") or ""),
+            str(getattr(field, "field_type", "") or ""),
+        ]
+    ).strip().lower()
+
+
+def _profile_first_last_name(profile_facts: dict[str, Any]) -> tuple[str | None, str | None]:
+    first = _profile_path_value(profile_facts, "first_name")
+    last = _profile_path_value(profile_facts, "last_name")
+    name = str(_profile_path_value(profile_facts, "name") or _profile_path_value(profile_facts, "full_name") or "").strip()
+    if (not first or not last) and name:
+        parts = name.split()
+        if not first and parts:
+            first = parts[0]
+        if not last and len(parts) > 1:
+            last = " ".join(parts[1:])
+    first_text = str(first or "").strip()
+    last_text = str(last or "").strip()
+    return first_text or None, last_text or None
+
+
+def _get_or_create_portal_password(
+    settings: Settings,
+    profile_facts: dict[str, Any],
+    portal_host: str,
+    email: str | None,
+    *,
+    status: str,
+) -> str | None:
+    if not portal_host:
+        return None
+    portal_account = _ensure_portal_account_record(profile_facts, portal_host)
+    existing = _portal_account_password(portal_account)
+    if existing:
+        return existing
+    password = _generate_portal_password()
+    portal_account.update(
+        {
+            "email": email,
+            "username": email,
+            "password": password,
+            "login_method": "password",
+            "account_mode": "create",
+            "status": status,
+            "credential_status": "generated",
+            "updated_at": _utc_now_iso(),
+        }
+    )
+    _persist_external_accounts(settings, profile_facts)
+    return password
+
+
+def _ensure_portal_account_record(profile_facts: dict[str, Any], portal_host: str) -> dict[str, Any]:
+    external_accounts = profile_facts.setdefault("external_accounts", {})
+    if not isinstance(external_accounts, dict):
+        external_accounts = {}
+        profile_facts["external_accounts"] = external_accounts
+    portals = external_accounts.setdefault("portals", {})
+    if not isinstance(portals, dict):
+        portals = {}
+        external_accounts["portals"] = portals
+    portal = portals.get(portal_host)
+    if not isinstance(portal, dict):
+        portal = {}
+        portals[portal_host] = portal
+    return portal
+
+
+def _generate_portal_password(length: int = 20) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+    while True:
+        password = "".join(secrets.choice(alphabet) for _ in range(length))
+        if (
+            any(ch.islower() for ch in password)
+            and any(ch.isupper() for ch in password)
+            and any(ch.isdigit() for ch in password)
+            and any(ch in "!@#$%^&*()-_=+" for ch in password)
+        ):
+            return password
+
+
+def _persist_external_accounts(settings: Settings, profile_facts: dict[str, Any]) -> None:
+    path = getattr(settings, "resolved_external_accounts_path", None)
+    if path is None:
+        return
+    external_accounts = profile_facts.get("external_accounts")
+    if not isinstance(external_accounts, dict):
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing: dict[str, Any] = {}
+        if path.exists():
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                existing = parsed
+        merged = _deep_merge_dict(existing, external_accounts)
+        path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        profile_facts["external_accounts"] = merged
+    except Exception as exc:
+        _emit(
+            "warning",
+            "external_accounts: failed to persist portal account",
+            {"error": str(exc), "portal_count": len(external_accounts.get("portals", {})) if isinstance(external_accounts.get("portals"), dict) else 0},
+        )
+
+
+def _deep_merge_dict(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
 def _preapproved_account_route_action(
@@ -922,6 +1568,31 @@ def _portal_account_password(portal_account: dict[str, Any] | None) -> str | Non
     return text or None
 
 
+def _portal_credential_available(
+    portal_account: dict[str, Any] | None,
+    *,
+    account_status: str | None,
+    credential_status: str | None,
+) -> bool:
+    if not _portal_account_password(portal_account):
+        return False
+    return not _portal_account_needs_user_credential(account_status, credential_status)
+
+
+def _portal_account_needs_user_credential(account_status: str | None, credential_status: str | None) -> bool:
+    blocked_statuses = {
+        "credential_required",
+        "existing_account_detected",
+        "needs_user",
+        "rejected",
+        "unknown",
+    }
+    return bool(
+        (account_status or "").strip().lower() in blocked_statuses
+        or (credential_status or "").strip().lower() in blocked_statuses
+    )
+
+
 def _portal_credential_status(portal_account: dict[str, Any] | None, saved_login_rejected: bool) -> str | None:
     if saved_login_rejected:
         return "rejected"
@@ -988,6 +1659,15 @@ def _find_create_account_action(observation: PageObservation) -> Any | None:
         if action.disabled:
             continue
         if _looks_like_create_account_label(action.label):
+            return action
+    return None
+
+
+def _find_apply_without_account_action(observation: PageObservation) -> Any | None:
+    for action in (*observation.buttons, *observation.links):
+        if action.disabled:
+            continue
+        if _looks_like_apply_without_account_label(action.label):
             return action
     return None
 
@@ -1083,7 +1763,23 @@ def _last_login_click_index(recent_actions: list[ActionTrace]) -> int | None:
 
 
 def _looks_like_create_account_label(label: str) -> bool:
-    return bool(re.search(r"\b(create (?:a )?(?:new )?account|register|sign up|sign-up|join now)\b", label.lower()))
+    return bool(
+        re.search(
+            r"\b(create (?:a )?(?:new )?(?:account|profile)|register|sign up|sign-up|join now)\b",
+            label.lower(),
+        )
+    )
+
+
+def _looks_like_apply_without_account_label(label: str) -> bool:
+    text = label.lower()
+    return bool(
+        re.search(
+            r"\b(apply|continue|proceed|checkout|submit).{0,40}\b(without|no).{0,30}\b(account|profile|sign(?:ing)? in|login)\b",
+            text,
+        )
+        or re.search(r"\b(skip|not now|maybe later|continue as guest|guest apply|apply as guest)\b", text)
+    )
 
 
 def _looks_like_login_label(label: str) -> bool:
@@ -1578,7 +2274,10 @@ def _click_allows_missing_required_fields(
     label = (_observed_action_label(observation, action.element_id) or "").strip()
     if not label:
         return False
-    if observation.page_type == "login" and _looks_like_create_account_label(label):
+    if observation.page_type == "login" and (
+        _looks_like_create_account_label(label)
+        or _looks_like_apply_without_account_label(label)
+    ):
         return True
     return False
 
@@ -1652,6 +2351,30 @@ async def _observe_delayed_transition_after_repeated_click(
     if not _looks_like_slow_transition_click(observation, action.element_id):
         return None
     if _has_substantive_page_errors(observation.errors) or _has_substantive_page_errors(previous_result.errors):
+        return None
+
+    for delay_seconds in (1.0, 2.0, 4.0):
+        await sleep_fn(delay_seconds)
+        next_observation = await observe_fn(tool_client, session_key)
+        if not _same_page_shape(next_observation, observation):
+            return next_observation
+    return None
+
+
+async def _observe_delayed_transition_after_click(
+    observation: PageObservation,
+    action: ProposedAction,
+    result: ActionResult,
+    tool_client: ToolClient,
+    session_key: str,
+    observe_fn: ObserveFn,
+    sleep_fn: SleepFn,
+) -> PageObservation | None:
+    if action.action_type != "click" or not action.element_id:
+        return None
+    if not result.ok or result.navigated:
+        return None
+    if not _looks_like_slow_transition_click(observation, action.element_id):
         return None
 
     for delay_seconds in (1.0, 2.0, 4.0):
@@ -1836,6 +2559,12 @@ def _normalize_field_label(label: str) -> str:
 def _question_for_field(field: Any) -> str:
     label = (field.label or "this field").strip()
     field_type = (field.field_type or "").strip().lower()
+    label_quality = str(getattr(field, "label_quality", "") or "").strip().lower()
+    if label_quality in {"missing", "weak"} or label == "this field":
+        return (
+            f"The page observation could not identify a reliable label for {field.element_id}. "
+            "Please review the field on the page and enter the correct answer."
+        )
     if field_type == "checkbox":
         return f"Should I tick: {label}?"
     if field_type in {"select", "radio"}:
@@ -1879,7 +2608,11 @@ def _field_shape(fields: list[Any]) -> list[tuple[str, str, bool, bool]]:
 
 def _looks_like_slow_transition_click(observation: PageObservation, element_id: str) -> bool:
     label = (_observed_action_label(observation, element_id) or "").strip().lower()
-    return bool(re.search(r"\b(create account|sign in|sign-in|log in|login|save and continue|continue|next)\b", label))
+    return bool(
+        re.search(r"\b(create account|sign in|sign-in|log in|login|save and continue|continue|next)\b", label)
+        or _looks_like_create_account_label(label)
+        or _looks_like_apply_without_account_label(label)
+    )
 
 
 def _has_substantive_page_errors(errors: list[str]) -> bool:
@@ -2015,6 +2748,10 @@ def _cover_letter_upload_still_observed(observation: PageObservation) -> bool:
 def _is_required_upload_field(field: Any) -> bool:
     if not _is_file_upload_field(field):
         return False
+    if getattr(field, "document_kind", None) == "additional_document":
+        return False
+    if getattr(field, "answerability", None) == "optional_skip":
+        return False
     text = " ".join([str(field.label or ""), str(field.nearby_text or "")]).lower()
     if "optional" in text:
         return False
@@ -2050,6 +2787,23 @@ def _preapproved_cover_letter_action(
         return None
 
     for field in observation.fields:
+        choice_value = _cover_letter_choice_value(field, cover_letter_path=cover_letter_path, cover_letter=cover_letter)
+        if choice_value:
+            current_value = _normalize_option_text(str(field.current_value or ""))
+            if current_value == _normalize_option_text(choice_value) and not field.invalid:
+                continue
+            action_type = "set_radio" if (field.field_type or "").strip().lower() == "radio" else "select_option"
+            if _has_recent_successful_field_action(recent_actions, field.element_id, action_type):
+                continue
+            return ProposedAction(
+                action_type=action_type,
+                element_id=field.element_id,
+                value=choice_value,
+                confidence=1.0,
+                risk="low",
+                reason="Select the cover-letter mode that matches the generated cover letter available for this application.",
+                source="profile",
+            )
         if not _looks_like_cover_letter_field(field):
             continue
         if field.current_value and not field.invalid:
@@ -2082,6 +2836,21 @@ def _preapproved_cover_letter_action(
                 reason="Cover letter text field uses the generated cover letter for this application.",
                 source="profile",
             )
+    return None
+
+
+def _cover_letter_choice_value(field: Any, *, cover_letter_path: str | None, cover_letter: str | None) -> str | None:
+    if not _looks_like_cover_letter_choice_field(field):
+        return None
+    options = [str(option).strip() for option in (getattr(field, "options", None) or []) if str(option).strip()]
+    if cover_letter_path:
+        for option in options:
+            if re.search(r"\b(upload|attach|file|computer)\b", _normalize_option_text(option)):
+                return option
+    if cover_letter:
+        for option in options:
+            if re.search(r"\b(write|paste|type|text)\b", _normalize_option_text(option)):
+                return option
     return None
 
 
@@ -2220,6 +2989,22 @@ def _field_has_useful_value(field: Any) -> bool:
         if _normalize_option_text(value) in {"select", "select one", "choose", "choose one", "please select", "please choose"}:
             return False
     return True
+
+
+def _action_value_for_event(observation: PageObservation, action: ProposedAction) -> str:
+    if not action.value:
+        return ""
+    field = _observed_field(observation, action.element_id)
+    label = " ".join(
+        [
+            field.label if field is not None else "",
+            field.field_type if field is not None else "",
+            action.element_id or "",
+        ]
+    ).lower()
+    if action.action_type == "fill_text" and re.search(r"\b(pass(word|phrase)?|secret|token|otp|code)\b", label):
+        return "[REDACTED]"
+    return str(action.value)[:80]
 
 
 def _record_generic_prompt_ack(

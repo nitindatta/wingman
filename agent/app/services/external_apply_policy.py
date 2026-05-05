@@ -102,12 +102,22 @@ def validate_external_apply_action(
     )
 
     if proposed_action.confidence < 0.75:
-        return PolicyDecision(
-            decision="paused",
-            reason=f"Planner confidence {proposed_action.confidence:.2f} is below the auto-action threshold.",
-            pause_reason="low_confidence",
-            risk_flags=["low_confidence"],
-        )
+        if proposed_action.action_type == "upload_file" and target_field is not None and proposed_action.source == "profile":
+            upload_decision = _validate_upload_file_action(
+                observation,
+                target_field,
+                proposed_action,
+                profile_facts or {},
+            )
+            if upload_decision is not None:
+                return upload_decision
+        else:
+            return PolicyDecision(
+                decision="paused",
+                reason=f"Planner confidence {proposed_action.confidence:.2f} is below the auto-action threshold.",
+                pause_reason="low_confidence",
+                risk_flags=["low_confidence"],
+            )
 
     if proposed_action.risk == "high" and not _approved_external_account_secret_action(
         proposed_action,
@@ -188,6 +198,7 @@ def validate_external_apply_action(
             )
         if action_type == "upload_file":
             upload_decision = _validate_upload_file_action(
+                observation,
                 target_field,
                 proposed_action,
                 profile_facts or {},
@@ -237,6 +248,7 @@ def _approved_external_account_secret_action(
 
 
 def _validate_upload_file_action(
+    observation: PageObservation,
     target_field: ObservedField,
     proposed_action: ProposedAction,
     profile_facts: dict[str, Any],
@@ -256,7 +268,9 @@ def _validate_upload_file_action(
         )
     if proposed_action.source != "profile":
         return None
-    if _looks_like_resume_upload_field(target_field):
+    is_cover_letter_target = _looks_like_cover_letter_upload_target(observation, target_field)
+    is_resume_target = not is_cover_letter_target and _looks_like_resume_upload_target(observation, target_field)
+    if is_resume_target:
         expected_values = _profile_values(profile_facts, ["resume_path"])
         if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
             return PolicyDecision(
@@ -264,9 +278,9 @@ def _validate_upload_file_action(
                 reason="Planner claimed a profile resume upload, but the file does not match profile_facts.resume_path.",
                 pause_reason="needs_approval",
                 risk_flags=["profile_value_mismatch"],
-            )
+        )
         return None
-    if _looks_like_cover_letter_field(target_field):
+    if is_cover_letter_target:
         expected_values = _profile_values(profile_facts, ["cover_letter_path"])
         if not expected_values or not _matches_any_expected_path(proposed_action.value, expected_values):
             resume_values = _profile_values(profile_facts, ["resume_path"])
@@ -475,13 +489,134 @@ def _is_file_upload_field(field: ObservedField) -> bool:
 
 
 def _looks_like_resume_upload_field(field: ObservedField) -> bool:
+    if getattr(field, "document_kind", None) == "resume":
+        return True
     label = " ".join([field.label, field.nearby_text]).lower()
     return bool(re.search(r"\b(resume|resum[eé]|cv|curriculum vitae)\b", label))
 
 
 def _looks_like_cover_letter_field(field: ObservedField) -> bool:
+    if getattr(field, "document_kind", None) == "cover_letter":
+        return True
     label = " ".join([field.label, field.nearby_text]).lower()
     return bool(re.search(r"\bcover\s+letter\b", label))
+
+
+def _looks_like_cover_letter_upload_target(observation: PageObservation, field: ObservedField) -> bool:
+    if not _is_file_upload_field(field):
+        return False
+    if getattr(field, "document_kind", None) == "cover_letter":
+        return True
+    if getattr(field, "document_kind", None) in {"resume", "additional_document"}:
+        return False
+    if _looks_like_cover_letter_field(field):
+        return True
+    if observation.page_type != "resume_upload":
+        return False
+    choice_index = _first_cover_letter_choice_index(observation)
+    field_index = _field_index(observation, field)
+    if choice_index is None or field_index is None or field_index <= choice_index:
+        return False
+    choice_field = observation.fields[choice_index]
+    current_value = _normalize_profile_value(choice_field.current_value or "")
+    choice_text = " ".join(
+        [choice_field.label, choice_field.nearby_text, *[str(option) for option in (choice_field.options or [])]]
+    ).lower()
+    return bool(
+        re.search(r"\b(upload|attach|file|computer)\b", current_value)
+        and re.search(r"\bcover\s+letter\b", choice_text)
+    )
+
+
+def _looks_like_cover_letter_choice_field(field: ObservedField) -> bool:
+    if field.field_type not in {"radio", "select"} and field.control_kind not in {
+        "native_radio_group",
+        "native_select",
+        "select",
+    }:
+        return False
+    text = " ".join(
+        [
+            field.label,
+            field.nearby_text,
+            *[str(option) for option in (field.options or [])],
+        ]
+    ).lower()
+    return bool(re.search(r"\bcover\s+letter\b", text))
+
+
+def _profile_cover_letter_choice_values(field: ObservedField, profile_facts: dict[str, Any]) -> list[str]:
+    options = [str(option).strip() for option in (field.options or []) if str(option).strip()]
+    if not options:
+        return []
+
+    has_cover_letter_path = bool(_profile_values(profile_facts, ["cover_letter_path"]))
+    has_cover_letter_text = bool(_profile_values(profile_facts, ["cover_letter"]))
+    allowed: list[str] = []
+
+    for option in options:
+        normalized = _normalize_profile_value(option)
+        if has_cover_letter_path and re.search(r"\b(upload|attach|file|computer)\b", normalized):
+            allowed.append(option)
+        elif has_cover_letter_text and re.search(r"\b(write|paste|type|text)\b", normalized):
+            allowed.append(option)
+        elif not has_cover_letter_path and not has_cover_letter_text and re.search(r"\bno cover letter\b", normalized):
+            allowed.append(option)
+    return allowed
+
+
+def _looks_like_resume_upload_target(observation: PageObservation, field: ObservedField) -> bool:
+    if getattr(field, "document_kind", None) == "resume":
+        return True
+    if getattr(field, "document_kind", None) in {"cover_letter", "additional_document"}:
+        return False
+    if _looks_like_resume_upload_field(field):
+        return True
+    if observation.page_type != "resume_upload" or not _is_file_upload_field(field):
+        return False
+    if _is_file_upload_before_cover_letter_choice(observation, field):
+        return True
+    if field.required:
+        return True
+    action_text = " ".join(
+        [
+            *[button.label for button in observation.buttons],
+            *[button.nearby_text for button in observation.buttons],
+            *[link.label for link in observation.links],
+            *[link.nearby_text for link in observation.links],
+        ]
+    ).lower()
+    if re.search(r"\bresume\b", action_text) and _count_file_upload_fields(observation) == 1:
+        return True
+    page_text = " ".join([observation.title, observation.visible_text, *observation.errors[:6]]).lower()
+    return bool(
+        re.search(r"\b(resume|resum[eÃ©]|cv|curriculum vitae)\b", page_text)
+        and re.search(r"\b(must|required|upload|choose file|browse|attach)\b", page_text)
+    )
+
+
+def _count_file_upload_fields(observation: PageObservation) -> int:
+    return sum(1 for field in observation.fields if _is_file_upload_field(field))
+
+
+def _is_file_upload_before_cover_letter_choice(observation: PageObservation, field: ObservedField) -> bool:
+    choice_index = _first_cover_letter_choice_index(observation)
+    field_index = _field_index(observation, field)
+    return choice_index is not None and field_index is not None and field_index < choice_index
+
+
+def _first_cover_letter_choice_index(observation: PageObservation) -> int | None:
+    for index, candidate in enumerate(observation.fields):
+        if _looks_like_cover_letter_choice_field(candidate):
+            return index
+    return None
+
+
+def _field_index(observation: PageObservation, field: ObservedField) -> int | None:
+    for index, candidate in enumerate(observation.fields):
+        if candidate.element_id == field.element_id:
+            return index
+    return None
 
 
 def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any]) -> list[str]:
@@ -505,6 +640,8 @@ def _profile_values_for_field(field: ObservedField, profile_facts: dict[str, Any
         return _profile_values(profile_facts, ["linkedin_url", "contact.linkedin", "contact.linkedin_url"])
     if _looks_like_resume_upload_field(field):
         return _profile_values(profile_facts, ["resume_path"])
+    if _looks_like_cover_letter_choice_field(field):
+        return _profile_cover_letter_choice_values(field, profile_facts)
     if _looks_like_cover_letter_field(field):
         if _is_file_upload_field(field):
             return _profile_values(profile_facts, ["cover_letter_path"])

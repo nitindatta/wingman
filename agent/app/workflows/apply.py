@@ -138,6 +138,8 @@ def build_apply_graph(
             return "completed", None
         if external.status == "ready_to_submit":
             return "paused", "external_apply_ready_to_submit"
+        if external.status == "email_verification_required":
+            return "paused", "external_apply_email_verification_required"
         if external.status == "paused_for_approval":
             return "paused", "external_apply_needs_approval"
         if external.status == "paused_for_user":
