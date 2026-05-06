@@ -34,7 +34,9 @@ function isSeekExternalInterstitialUrl(url: string): boolean {
   }
 }
 
-export function isConfirmationPage(pageText: string): boolean {
+export function isConfirmationPage(pageText: string, url = ''): boolean {
+  if (/\/apply\/success(?:\/|$|\?)/i.test(url)) return true;
+
   return (
     /application (submitted|received|successful|complete|sent)/i.test(pageText) ||
     /thank you for applying/i.test(pageText) ||

@@ -22,7 +22,6 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlparse
 
 log = logging.getLogger("apply")
 
@@ -110,16 +109,19 @@ def _clean_action_label(label: str) -> str:
     return re.sub(r"[\u2060\u200b\u200c\u200d\ufeff]|\s+", " ", label).strip()
 
 
-def _is_linkedin_step(step: StepInfo | None) -> bool:
+def _step_signature(step: StepInfo | None) -> tuple:
     if step is None:
-        return False
-    if (step.portal_type or "").lower() == "linkedin":
-        return True
-    try:
-        host = urlparse(step.page_url).hostname or ""
-        return "linkedin.com" in host.lower()
-    except Exception:
-        return False
+        return ()
+    return (
+        step.page_url,
+        step.page_type,
+        tuple(field.id for field in step.fields),
+        tuple(_clean_action_label(action).lower() for action in step.visible_actions),
+    )
+
+
+def _is_same_step(left: StepInfo | None, right: StepInfo | None) -> bool:
+    return bool(left and right and _step_signature(left) == _step_signature(right))
 
 
 def _action_label_for_step(step: StepInfo | None, requested: str = "Continue") -> str | None:
@@ -145,7 +147,7 @@ def _action_label_for_step(step: StepInfo | None, requested: str = "Continue") -
             if re.search(pattern, action, flags=re.IGNORECASE):
                 return action
 
-    if _is_linkedin_step(step):
+    if actions:
         return None
     return requested_clean or "Continue"
 
@@ -928,7 +930,7 @@ def build_apply_graph(
         if not action_label:
             step = state.current_step
             message = (
-                "No safe visible action button was found for this LinkedIn apply step. "
+                "No safe visible action button was found for this apply step. "
                 f"Observed actions: {step.visible_actions if step else []}"
             )
             log.warning("[fill] %s", message)
@@ -1025,6 +1027,26 @@ def build_apply_graph(
             "step_number": len(new_history),
         })
 
+        if _is_same_step(state.current_step, next_step):
+            message = (
+                "The page did not advance after clicking the visible action. "
+                "Please review any highlighted validation errors or missing answers, then resume."
+            )
+            log.warning("[fill] same step after action — pausing: url=%s fields=%d actions=%s",
+                        next_step.page_url, len(next_step.fields), next_step.visible_actions)
+            ev("node", "fill: PAUSED — page did not advance after action", {
+                "url": next_step.page_url,
+                "fields": len(next_step.fields),
+                "actions": next_step.visible_actions,
+            })
+            return {
+                "current_step": next_step,
+                "status": "paused",
+                "pause_reason": "step_not_advanced",
+                "error": message,
+                "step_history": new_history,
+            }
+
         if next_step.page_type == "confirmation":
             log.info("[fill] application submitted — confirmation page")
             ev("node", "fill: CONFIRMATION — application submitted via fill!", {
@@ -1064,7 +1086,24 @@ def build_apply_graph(
             }
 
         if next_step.page_type == "form" and len(next_step.fields) == 0:
-            auto_label = _action_label_for_step(next_step, "Continue") or "Continue"
+            auto_label = _action_label_for_step(next_step, "Continue")
+            if not auto_label:
+                message = (
+                    "The form has no fields and no safe navigation action. "
+                    f"Observed actions: {next_step.visible_actions}"
+                )
+                log.warning("[fill] %s", message)
+                ev("node", "fill: PAUSED — no safe action on 0-field page", {
+                    "all_actions": next_step.visible_actions,
+                    "url": next_step.page_url,
+                })
+                return {
+                    "current_step": next_step,
+                    "status": "paused",
+                    "pause_reason": "action_not_found",
+                    "error": message,
+                    "step_history": new_history,
+                }
             log.info("[fill] interim 0-field page — auto-clicking %r all_actions=%s",
                      auto_label, next_step.visible_actions)
             ev("node", f"fill: interim 0-field page — auto-clicking '{auto_label}'", {

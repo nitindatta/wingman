@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { chooseBestExternalApplyHref, detectPortalType, isExternalPortalUrl } from './apply.js';
+import { chooseBestExternalApplyHref, detectPortalType, isConfirmationPage, isExternalPortalUrl } from './apply.js';
 
 describe('SEEK external apply URL selection', () => {
   it('prefers Apply with SEEK over an advertiser external link when both are offered', () => {
@@ -62,5 +62,14 @@ describe('SEEK external apply URL selection', () => {
     expect(isExternalPortalUrl('https://au.seek.com/job/91685860/apply/external')).toBe(true);
     expect(isExternalPortalUrl('https://www.seek.com.au/job/123/apply/external')).toBe(true);
     expect(isExternalPortalUrl('https://secure.dc2.pageuppeople.com/apply/889/aw/applicationForm/initApplication.asp')).toBe(true);
+  });
+
+  it('treats SEEK success URLs as confirmation even when the page offers post-submit actions', () => {
+    expect(
+      isConfirmationPage(
+        'Show strong interest',
+        'https://au.seek.com/job/91854803/apply/success',
+      ),
+    ).toBe(true);
   });
 });
