@@ -26,6 +26,13 @@ import {
   detectPortalType as seekDetectPortalType,
   startApply as seekStartApply,
 } from '../providers/seek/apply.js';
+import {
+  LINKEDIN_EASY_APPLY_ROOT_SELECTOR,
+  isConfirmationPage as linkedinIsConfirmation,
+  isExternalPortalUrl as linkedinIsExternalPortal,
+  detectPortalType as linkedinDetectPortalType,
+  startApply as linkedinStartApply,
+} from '../providers/linkedin/apply.js';
 
 const PROVIDER_LOGIN_URLS: Record<string, string> = {
   seek: 'https://www.seek.com.au/oauth/login/',
@@ -89,7 +96,86 @@ function inspectOptsFor(provider: string): InspectOptions {
       detectPortalType: (url) => seekDetectPortalType(url),
     };
   }
+  if (provider === 'linkedin') {
+    return {
+      isConfirmation: (text) => linkedinIsConfirmation(text),
+      isExternalPortal: (url) => linkedinIsExternalPortal(url),
+      detectPortalType: (url) => linkedinDetectPortalType(url),
+      formRootSelector: LINKEDIN_EASY_APPLY_ROOT_SELECTOR,
+      requireFormRoot: true,
+    };
+  }
   return {};
+}
+
+function formRootSelectorFor(provider: string): string | undefined {
+  return inspectOptsFor(provider).formRootSelector;
+}
+
+function formScopeFor(page: Page, provider: string): Page | Locator {
+  const selector = formRootSelectorFor(provider);
+  return selector ? page.locator(selector).first() : page;
+}
+
+function isLinkedInFinalSubmitAction(provider: string, actionLabel: string): boolean {
+  return provider === 'linkedin' && /\b(submit|apply now)\b/i.test(actionLabel);
+}
+
+async function visibleActionTexts(scope: Page | Locator): Promise<string[]> {
+  const buttons = await scope
+    .locator('button[type="submit"], button[type="button"], input[type="submit"]')
+    .all();
+  const actions: string[] = [];
+  for (const btn of buttons) {
+    const raw = (await btn.textContent().catch(() => ''))?.trim() ?? '';
+    const text = raw.replace(/[\u2060\u200b\u200c\u200d\uFEFF]/g, '').trim();
+    if (text && !actions.includes(text)) actions.push(text);
+  }
+  return actions;
+}
+
+export async function linkedInPostSubmitFallbackStep(
+  page: Page,
+  actionLabel: string,
+): Promise<StepInfo | null> {
+  if (!isLinkedInFinalSubmitAction('linkedin', actionLabel)) return null;
+
+  await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {});
+  await page.waitForTimeout(4_000).catch(() => {});
+
+  const formRoot = page.locator(LINKEDIN_EASY_APPLY_ROOT_SELECTOR).first();
+  const formRootVisible = await formRoot.isVisible().catch(() => false);
+  if (formRootVisible) return null;
+
+  const url = page.url();
+  const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+  if (linkedinIsConfirmation(pageText)) {
+    return {
+      page_url: url,
+      page_type: 'confirmation',
+      step_index: null,
+      total_steps_estimate: null,
+      is_external_portal: false,
+      portal_type: null,
+      fields: [],
+      visible_actions: [],
+    };
+  }
+
+  const actions = await visibleActionTexts(page);
+  const stillHasSubmit = actions.some((action) => isLinkedInFinalSubmitAction('linkedin', action));
+  if (stillHasSubmit) return null;
+
+  return {
+    page_url: url,
+    page_type: 'form',
+    step_index: null,
+    total_steps_estimate: null,
+    is_external_portal: false,
+    portal_type: null,
+    fields: [],
+    visible_actions: actions,
+  };
 }
 
 export function registerBrowserRoutes(app: FastifyInstance): void {
@@ -387,14 +473,16 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     // Primary: getByRole (respects aria-label, accessible name).
     // Fallback 1: text-content locator (handles buttons where accessible name ≠ visible text).
     // Fallback 2: evaluate() direct DOM click — bypasses Playwright role resolution entirely.
-    let actionBtn = session.page
+    const actionScope = formScopeFor(session.page, session.provider);
+    const formRootSelector = formRootSelectorFor(session.provider);
+    let actionBtn = actionScope
       .getByRole('button', { name: cleanLabel, exact: false })
       .first();
     try {
       await actionBtn.click({ timeout: 10_000 });
     } catch {
       // Fallback 1: match any button/link whose text content contains the label
-      actionBtn = session.page
+      actionBtn = actionScope
         .locator('button, [role="button"], a[role="button"], input[type="submit"]')
         .filter({ hasText: cleanLabel })
         .first();
@@ -403,12 +491,14 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
         await actionBtn.click({ timeout: 10_000 });
       } else {
         // Fallback 2: direct DOM querySelector by text — covers React portals, custom elements
-        await session.page.evaluate((label) => {
-          const all = Array.from(document.querySelectorAll<HTMLElement>('button, [role="button"], a'));
+        await session.page.evaluate(({ label, rootSelector }) => {
+          const root = rootSelector ? document.querySelector(rootSelector) : document;
+          if (!root) throw new Error(`No form root found while looking for text: ${label}`);
+          const all = Array.from(root.querySelectorAll<HTMLElement>('button, [role="button"], a'));
           const el = all.find((e) => (e.textContent ?? '').trim().toLowerCase().includes(label.toLowerCase()));
           if (!el) throw new Error(`No element found with text: ${label}`);
           el.click();
-        }, cleanLabel);
+        }, { label: cleanLabel, rootSelector: formRootSelector ?? null });
         // Re-point actionBtn to something stable for the waitFor race below
         actionBtn = session.page.locator('body').first();
       }
@@ -431,6 +521,18 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
     // Inspect the new step using provider-specific options
     const result = await inspectStep(session.page, inspectOptsFor(session.provider));
     if (!result.ok) {
+      const linkedInPostSubmitStep = isLinkedInFinalSubmitAction(session.provider, cleanLabel)
+        ? await linkedInPostSubmitFallbackStep(session.page, cleanLabel)
+        : null;
+      if (linkedInPostSubmitStep) {
+        return ok({
+          filled_ids,
+          failed_ids,
+          navigated: session.page.url() !== prevUrl,
+          new_page_state: linkedInPostSubmitStep,
+        });
+      }
+
       const snapshotPath = await saveSnapshot(session.page, 'drift');
       return {
         status: 'drift' as const,
@@ -538,6 +640,21 @@ export function registerBrowserRoutes(app: FastifyInstance): void {
       } catch (err) {
         // Catch Playwright errors (network failure, timeout, etc.) so they return
         // a proper error envelope instead of crashing Fastify with HTTP 500.
+        return error('navigation_failed', String(err));
+      }
+    }
+
+    if (parsed.data.provider === 'linkedin') {
+      try {
+        const result = await linkedinStartApply(session.page, parsed.data.job_url);
+        if (result.status === 'needs_human') {
+          return { status: 'needs_human' as const, data: { reason: result.reason, login_url: result.login_url } };
+        }
+        if (result.status === 'error') {
+          return error(result.type, result.message);
+        }
+        return ok({ apply_url: result.apply_url, is_external_portal: result.is_external_portal, portal_type: result.portal_type });
+      } catch (err) {
         return error('navigation_failed', String(err));
       }
     }

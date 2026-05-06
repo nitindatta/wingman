@@ -37,6 +37,10 @@ export type InspectOptions = {
   isExternalPortal?: (url: string) => boolean;
   /** Provider-specific function to identify the portal type from URL. */
   detectPortalType?: (url: string) => string | null;
+  /** Optional provider-specific root that contains the actual application form. */
+  formRootSelector?: string;
+  /** If true, missing formRootSelector is treated as drift instead of falling back to the page. */
+  requireFormRoot?: boolean;
 };
 
 export async function inspectStep(page: Page, opts: InspectOptions = {}): Promise<InspectResult> {
@@ -45,6 +49,7 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
   const isExternal = opts.isExternalPortal ?? (() => false);
   const getPortalType = opts.detectPortalType ?? (() => null);
   const checkConfirmation = opts.isConfirmation ?? (() => false);
+  const formRootSelector = opts.formRootSelector;
 
   const is_external_portal = isExternal(url);
   const portal_type = is_external_portal ? getPortalType(url) : null;
@@ -55,7 +60,19 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
   }
 
   // Detect confirmation page using provider-supplied checker
-  const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+  const hasFormRoot = formRootSelector
+    ? (await page.locator(formRootSelector).first().count().catch(() => 0)) > 0
+    : true;
+  if (formRootSelector && opts.requireFormRoot && !hasFormRoot) {
+    return { ok: false, reason: `Expected provider form root not found: ${formRootSelector}` };
+  }
+
+  const root = formRootSelector && hasFormRoot ? page.locator(formRootSelector).first() : null;
+  const pageText = (
+    root
+      ? await root.textContent().catch(() => '')
+      : await page.evaluate(() => document.body.innerText).catch(() => '')
+  ) ?? '';
   if (checkConfirmation(pageText, url)) {
     return {
       ok: true,
@@ -75,7 +92,7 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
   // Extract step progress (e.g. "Step 2 of 4")
   let step_index: number | null = null;
   let total_steps_estimate: number | null = null;
-  const stepText = await page
+  const stepText = await (root ?? page)
     .locator('[data-automation="progress-indicator"], [data-testid="progress"]')
     .first()
     .textContent()
@@ -91,12 +108,12 @@ export async function inspectStep(page: Page, opts: InspectOptions = {}): Promis
   }
 
   // Extract form fields (generic — works on any site using standard HTML inputs)
-  const fields = await extractFields(page);
+  const fields = await extractFields(page, root ? formRootSelector : undefined);
   markRequiredFromValidationText(fields, pageText);
 
   // Extract visible action buttons
   const _noisePatterns = /^(open app|get app|download|sign in|log in|back|cancel|close|dismiss)$/i;
-  const actionButtons = await page
+  const actionButtons = await (root ?? page)
     .locator('button[type="submit"], button[type="button"], input[type="submit"]')
     .all();
   const visible_actions: string[] = [];
@@ -166,14 +183,17 @@ export function markRequiredFromValidationText(fields: FieldInfo[], pageText: st
   }
 }
 
-async function extractFields(page: Page): Promise<FieldInfo[]> {
-  return page.evaluate(() => {
+async function extractFields(page: Page, rootSelector?: string): Promise<FieldInfo[]> {
+  return page.evaluate((selector: string | null) => {
     const fields: Array<{
       id: string; label: string; field_type: string; required: boolean;
       current_value: string | null; options: string[] | null; max_length: number | null;
     }> = [];
 
-    const inputs = document.querySelectorAll(
+    const root = selector ? document.querySelector(selector) : document;
+    if (!root) return fields;
+
+    const inputs = root.querySelectorAll(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"]), textarea, select',
     );
 
@@ -247,14 +267,14 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
         if (!groupLabel) groupLabel = label;
 
         // Collect all option labels in this group
-        const groupOptions = Array.from(document.querySelectorAll<HTMLInputElement>(`input[name="${groupName}"]`))
+        const groupOptions = Array.from(root.querySelectorAll<HTMLInputElement>(`input[name="${groupName}"]`))
           .map((r) => {
             const lbl = document.querySelector(`label[for="${r.id}"]`) ??
               r.closest('label') ??
               r.closest('[class*="field"],[class*="question"]')?.querySelector('label,[class*="label"]');
             return lbl?.textContent?.trim() ?? r.value ?? '';
           }).filter(Boolean);
-        const checkedEl = document.querySelector<HTMLInputElement>(`input[name="${groupName}"]:checked`);
+        const checkedEl = root.querySelector<HTMLInputElement>(`input[name="${groupName}"]:checked`);
         const checkedLabel = checkedEl
           ? (document.querySelector(`label[for="${checkedEl.id}"]`)?.textContent?.trim() ?? checkedEl.value)
           : null;
@@ -289,6 +309,6 @@ async function extractFields(page: Page): Promise<FieldInfo[]> {
       seen.add(f.id);
       return true;
     });
-  }) as unknown as FieldInfo[];
+  }, rootSelector ?? null) as unknown as FieldInfo[];
 }
 

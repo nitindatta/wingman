@@ -22,6 +22,7 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 
 log = logging.getLogger("apply")
 
@@ -103,6 +104,50 @@ def _is_session_lost(env) -> bool:
         and env.error is not None
         and env.error.type == "session_not_found"
     )
+
+
+def _clean_action_label(label: str) -> str:
+    return re.sub(r"[\u2060\u200b\u200c\u200d\ufeff]|\s+", " ", label).strip()
+
+
+def _is_linkedin_step(step: StepInfo | None) -> bool:
+    if step is None:
+        return False
+    if (step.portal_type or "").lower() == "linkedin":
+        return True
+    try:
+        host = urlparse(step.page_url).hostname or ""
+        return "linkedin.com" in host.lower()
+    except Exception:
+        return False
+
+
+def _action_label_for_step(step: StepInfo | None, requested: str = "Continue") -> str | None:
+    """Pick the action that is actually visible on the current provider step."""
+    if step is None:
+        return requested or "Continue"
+
+    actions = [_clean_action_label(action) for action in step.visible_actions]
+    actions = [action for action in actions if action]
+    requested_clean = _clean_action_label(requested)
+    for action in actions:
+        if action.lower() == requested_clean.lower():
+            return action
+
+    preferred_patterns = [
+        r"\bcontinue\b",
+        r"\bnext\b",
+        r"\bsave and continue\b",
+        r"\breview\b",
+    ]
+    for pattern in preferred_patterns:
+        for action in actions:
+            if re.search(pattern, action, flags=re.IGNORECASE):
+                return action
+
+    if _is_linkedin_step(step):
+        return None
+    return requested_clean or "Continue"
 
 
 def build_apply_graph(
@@ -455,7 +500,10 @@ def build_apply_graph(
             })
             return {"current_step": step, "status": "paused", "pause_reason": "external_portal"}
 
-        return {"current_step": step}
+        return {
+            "current_step": step,
+            "action_label": _action_label_for_step(step, "Continue") or state.action_label,
+        }
 
     # ── external apply harness ───────────────────────────────────────────────
     async def node_external_apply(state: ApplyState) -> dict[str, Any]:
@@ -876,11 +924,25 @@ def build_apply_graph(
             log.debug("[fill] skipping — status=%s", state.status)
             return {}
 
+        action_label = _action_label_for_step(state.current_step, state.action_label)
+        if not action_label:
+            step = state.current_step
+            message = (
+                "No safe visible action button was found for this LinkedIn apply step. "
+                f"Observed actions: {step.visible_actions if step else []}"
+            )
+            log.warning("[fill] %s", message)
+            ev("node", "fill: PAUSED - no visible action for current provider step", {
+                "url": step.page_url if step else "",
+                "actions": step.visible_actions if step else [],
+            })
+            return {"status": "paused", "pause_reason": "action_not_found", "error": message}
+
         log.info("[fill] session_key=%s fields=%d action_label=%r",
-                 state.session_key, len(state.proposed_values), state.action_label)
-        ev("node", f"fill: submitting {len(state.proposed_values)} fields via '{state.action_label}'", {
+                 state.session_key, len(state.proposed_values), action_label)
+        ev("node", f"fill: submitting {len(state.proposed_values)} fields via '{action_label}'", {
             "fields_count": len(state.proposed_values),
-            "action_label": state.action_label,
+            "action_label": action_label,
             "filled_values": {k: str(v)[:80] for k, v in state.proposed_values.items()},
             "step_number": len(state.step_history) + 1,
         })
@@ -890,7 +952,7 @@ def build_apply_graph(
                 tool_client,
                 state.session_key,
                 fields=state.proposed_values,
-                action_label=state.action_label,
+                action_label=action_label,
             )
         except (BrowserToolError, ToolServiceError) as exc:
             log.error("[fill] fill_and_continue failed: %s", exc)
@@ -912,7 +974,7 @@ def build_apply_graph(
                 new_key = await _recover_session(state)
                 if new_key:
                     next_step, env = await fill_and_continue(
-                        tool_client, new_key, state.proposed_values, action_label=state.action_label
+                        tool_client, new_key, state.proposed_values, action_label=action_label
                     )
                     if next_step is not None:
                         log.info("[fill] recovery succeeded — new session_key=%s", new_key)
@@ -1002,10 +1064,7 @@ def build_apply_graph(
             }
 
         if next_step.page_type == "form" and len(next_step.fields) == 0:
-            auto_label = next(
-                (a for a in next_step.visible_actions if "continue" in a.lower()),
-                "Continue",
-            )
+            auto_label = _action_label_for_step(next_step, "Continue") or "Continue"
             log.info("[fill] interim 0-field page — auto-clicking %r all_actions=%s",
                      auto_label, next_step.visible_actions)
             ev("node", f"fill: interim 0-field page — auto-clicking '{auto_label}'", {
@@ -1023,7 +1082,7 @@ def build_apply_graph(
         return {
             "current_step": next_step,
             "proposed_values": {},
-            "action_label": "Continue",
+            "action_label": _action_label_for_step(next_step, "Continue") or "Continue",
             "step_history": new_history,
         }
 

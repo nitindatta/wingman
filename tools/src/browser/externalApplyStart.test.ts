@@ -15,25 +15,25 @@ describe('startGenericExternalApply', () => {
         calls.push(`timeout:${timeoutMs}`);
       },
       url() {
-        return 'https://www.linkedin.com/jobs/view/123';
+        return 'https://jobs.example/view/123';
       },
     };
 
     const result = await startGenericExternalApply(
       page,
-      'linkedin',
-      'https://www.linkedin.com/jobs/view/123',
+      'indeed',
+      'https://jobs.example/view/123',
     );
 
     expect(calls).toEqual([
-      'goto:https://www.linkedin.com/jobs/view/123',
+      'goto:https://jobs.example/view/123',
       'wait:networkidle',
       'timeout:1500',
     ]);
     expect(result).toEqual({
-      apply_url: 'https://www.linkedin.com/jobs/view/123',
+      apply_url: 'https://jobs.example/view/123',
       is_external_portal: true,
-      portal_type: 'linkedin',
+      portal_type: 'indeed',
     });
   });
 

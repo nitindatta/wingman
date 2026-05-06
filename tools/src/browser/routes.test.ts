@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { maybeAdoptNewExternalApplyPage } from './routes.js';
+import { linkedInPostSubmitFallbackStep, maybeAdoptNewExternalApplyPage } from './routes.js';
 
 describe('browser routes external apply page handoff', () => {
   it('adopts a new company-site page after a successful click that does not navigate the current tab', async () => {
@@ -68,6 +68,37 @@ describe('browser routes external apply page handoff', () => {
   });
 });
 
+describe('LinkedIn post-submit fallback', () => {
+  it('treats a closed Easy Apply modal with no submit button as a completed post-submit page', async () => {
+    const page = makeLinkedInPostSubmitPage({
+      url: 'https://www.linkedin.com/jobs/view/4404477725/',
+      modalVisible: false,
+      actions: ['Easy Apply', 'Save'],
+      text: 'Lead Data Engineer Easy Apply Save',
+    });
+
+    const step = await linkedInPostSubmitFallbackStep(page as never, 'Submit application');
+
+    expect(step).toMatchObject({
+      page_url: 'https://www.linkedin.com/jobs/view/4404477725/',
+      page_type: 'form',
+      fields: [],
+      visible_actions: ['Easy Apply', 'Save'],
+    });
+  });
+
+  it('does not assume success when LinkedIn still shows a submit button', async () => {
+    const page = makeLinkedInPostSubmitPage({
+      url: 'https://www.linkedin.com/jobs/view/4404477725/',
+      modalVisible: false,
+      actions: ['Edit', 'Submit application'],
+      text: 'Review your application Submit application',
+    });
+
+    await expect(linkedInPostSubmitFallbackStep(page as never, 'Submit application')).resolves.toBeNull();
+  });
+});
+
 function makePage(url: string) {
   return {
     url: vi.fn(() => url),
@@ -76,5 +107,41 @@ function makePage(url: string) {
     bringToFront: vi.fn(async () => {}),
     waitForLoadState: vi.fn(async () => {}),
     waitForTimeout: vi.fn(async () => {}),
+  };
+}
+
+function makeLinkedInPostSubmitPage({
+  url,
+  modalVisible,
+  actions,
+  text,
+}: {
+  url: string;
+  modalVisible: boolean;
+  actions: string[];
+  text: string;
+}) {
+  const actionLocators = actions.map((action) => ({
+    textContent: vi.fn(async () => action),
+  }));
+  const pageLocator = {
+    all: vi.fn(async () => actionLocators),
+  };
+  const modalLocator = {
+    first: vi.fn(() => modalLocator),
+    isVisible: vi.fn(async () => modalVisible),
+  };
+
+  return {
+    url: vi.fn(() => url),
+    waitForLoadState: vi.fn(async () => {}),
+    waitForTimeout: vi.fn(async () => {}),
+    evaluate: vi.fn(async () => text),
+    locator: vi.fn((selector: string) => {
+      if (selector.includes('easy-apply') || selector.includes('artdeco-modal')) {
+        return modalLocator;
+      }
+      return pageLocator;
+    }),
   };
 }
